@@ -1,0 +1,6 @@
+ts=2026-09-30T20:09:50Z level=info service=api msg="server started" port=8080 pid=4471
+ts=2026-09-30T20:10:22Z level=warn service=api user=alice action=login src_ip=203.0.113.55 result=fail reason=badpass
+ts=2026-09-30T20:10:24Z level=warn service=api user=alice action=login src_ip=203.0.113.55 result=fail reason=badpass
+ts=2026-09-30T20:10:31Z level=info service=api user=root action=login src_ip=203.0.113.55 result=ok session=9f3a
+ts=2026-09-30T20:10:45Z level=error service=api user=root action=download src_ip=203.0.113.55 path=/x.sh bytes=812 status=200
+ts=2026-09-30T20:11:03Z level=info service=api user=root action=exec src_ip=203.0.113.55 cmd="bash x.sh" status=0

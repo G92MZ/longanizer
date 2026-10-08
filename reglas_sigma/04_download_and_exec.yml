@@ -1,0 +1,25 @@
+title: Execution - Tool download (wget/curl) or pipe to shell
+id: 10000000-0000-0000-0000-000000000004
+status: experimental
+description: Use of wget/curl to fetch a file, or a pipe to bash/sh.
+author: ejemplo-loganalyzer
+level: high
+tags:
+  - attack.execution
+  - attack.t1059.004
+  - attack.command_and_control
+  - attack.t1105
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  sel_dl:
+    CommandLine|contains:
+      - 'wget '
+      - 'curl '
+  sel_pipe:
+    CommandLine|contains:
+      - '| bash'
+      - '| sh'
+      - 'bash -c'
+  condition: sel_dl or sel_pipe

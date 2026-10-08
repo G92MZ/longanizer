@@ -1,0 +1,5 @@
+Sep 30 22:09:55 web01 systemd[1]: Started Session 42 of user root.
+Sep 30 22:11:01 web01 CRON[2100]: (root) CMD (/usr/local/bin/backup.sh)
+Sep 30 22:11:40 web01 kernel: [12345.6789] Out of memory: Killed process 2200 (python3)
+Oct  1 00:00:01 web01 systemd[1]: Starting Daily apt upgrade and clean activities...
+Oct  1 08:03:12 web01 systemd[1]: Started Session 51 of user greg.

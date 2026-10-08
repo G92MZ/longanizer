@@ -1,0 +1,17 @@
+title: SSH - Authentication failures (possible brute force)
+id: 10000000-0000-0000-0000-000000000001
+status: experimental
+description: Repeated password failures in sshd; sign of brute force.
+author: ejemplo-loganalyzer
+level: medium
+tags:
+  - attack.credential_access
+  - attack.t1110
+logsource:
+  product: linux
+  service: auth
+detection:
+  keywords:
+    - 'Failed password'
+    - 'authentication failure'
+  condition: keywords

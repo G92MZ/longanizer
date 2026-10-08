@@ -1,0 +1,19 @@
+title: Web - Access to script/webshell with server error
+id: 10000000-0000-0000-0000-000000000003
+status: experimental
+description: Request to a .sh or cgi-bin returning 5xx; possible webshell or RCE.
+author: ejemplo-loganalyzer
+level: high
+tags:
+  - attack.initial_access
+  - attack.t1190
+logsource:
+  category: webserver
+detection:
+  sel_path:
+    cs-uri|contains:
+      - '.sh'
+      - '/cgi-bin/'
+  sel_status:
+    sc-status|gte: 500
+  condition: sel_path and sel_status

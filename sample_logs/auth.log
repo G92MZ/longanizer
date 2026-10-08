@@ -1,0 +1,23 @@
+Sep 30 22:10:01 web01 sshd[2041]: Failed password for invalid user admin from 203.0.113.55 port 51220 ssh2
+Sep 30 22:10:01 web01 sshd[2041]: Invalid user admin from 203.0.113.55 port 51220
+Sep 30 22:10:03 web01 sshd[2043]: Failed password for invalid user oracle from 203.0.113.55 port 51230 ssh2
+Sep 30 22:10:03 web01 sshd[2043]: Invalid user oracle from 203.0.113.55 port 51230
+Sep 30 22:10:05 web01 sshd[2044]: Failed password for invalid user postgres from 203.0.113.55 port 51235 ssh2
+Sep 30 22:10:05 web01 sshd[2044]: Invalid user postgres from 203.0.113.55 port 51235
+Sep 30 22:10:07 web01 sshd[2045]: Failed password for root from 203.0.113.55 port 51240 ssh2
+Sep 30 22:10:09 web01 sshd[2047]: Failed password for root from 203.0.113.55 port 51250 ssh2
+Sep 30 22:10:11 web01 sshd[2049]: Failed password for root from 203.0.113.55 port 51260 ssh2
+Sep 30 22:10:13 web01 sshd[2051]: Failed password for root from 203.0.113.55 port 51270 ssh2
+Sep 30 22:10:15 web01 sshd[2053]: Failed password for root from 203.0.113.55 port 51280 ssh2
+Sep 30 22:10:17 web01 sshd[2055]: Failed password for invalid user test from 203.0.113.55 port 51290 ssh2
+Sep 30 22:10:17 web01 sshd[2055]: Invalid user test from 203.0.113.55 port 51290
+Sep 30 22:10:40 web01 sshd[2070]: Failed password for root from 198.51.100.7 port 44110 ssh2
+Sep 30 22:10:42 web01 sshd[2072]: Failed password for invalid user git from 198.51.100.7 port 44112 ssh2
+Sep 30 22:10:42 web01 sshd[2072]: Invalid user git from 198.51.100.7 port 44112
+Sep 30 22:10:20 web01 sshd[2060]: Accepted password for root from 203.0.113.55 port 51300 ssh2
+Sep 30 22:10:20 web01 sshd[2060]: pam_unix(sshd:session): session opened for user root by (uid=0)
+Oct  1 08:10:05 web01 sudo:     greg : TTY=pts/0 ; PWD=/home/greg ; USER=root ; COMMAND=/usr/bin/vi /etc/hosts
+Oct  1 08:10:22 web01 sudo:     greg : TTY=pts/0 ; PWD=/home/greg ; USER=root ; COMMAND=/usr/bin/find / -name id_rsa -exec /bin/sh ;
+Oct  1 08:10:48 web01 sudo:     greg : TTY=pts/0 ; PWD=/home/greg ; USER=root ; COMMAND=/bin/tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh
+Oct  1 08:11:10 web01 sudo:     greg : TTY=pts/0 ; PWD=/home/greg ; USER=root ; COMMAND=/usr/bin/less /var/log/auth.log
+Oct  1 08:11:30 web01 sudo:     greg : TTY=pts/0 ; PWD=/home/greg ; USER=root ; COMMAND=/bin/bash

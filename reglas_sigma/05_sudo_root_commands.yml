@@ -1,0 +1,17 @@
+title: Sudo - Command executed as root
+id: 10000000-0000-0000-0000-000000000005
+status: experimental
+description: sudo usage recorded in auth.log (review executed commands).
+author: ejemplo-loganalyzer
+level: low
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  product: linux
+  service: sudo
+detection:
+  keywords:
+    - 'COMMAND='
+    - 'sudo:'
+  condition: keywords

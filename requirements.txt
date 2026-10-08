@@ -1,0 +1,11 @@
+duckdb>=1.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+httpx>=0.27
+# opcional: solo para el servidor MCP (pestaña MCP / python -m loganalyzer.mcp_server)
+mcp>=1.0
+# opcional: solo para la pestaña Sigma (ejecutar reglas Sigma sobre los logs)
+pysigma>=0.11
+# opcional: solo para GeoIP/ASN (leer las bases DB-IP Lite en la pestaña Resumen)
+maxminddb>=2.2

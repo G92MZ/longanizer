@@ -1,0 +1,3 @@
+2026/09/30 22:14:04 [error] 1234#0: *5 open() "/var/www/html/cgi-bin/x.sh" failed (2: No such file or directory), client: 203.0.113.55, server: web01, request: "POST /cgi-bin/x.sh HTTP/1.1", host: "web01"
+2026/09/30 22:14:08 [error] 1234#0: *7 FastCGI sent in stderr: "Primary script unknown" while reading response header from upstream, client: 203.0.113.55, server: web01, request: "POST /cgi-bin/test.cgi HTTP/1.1", host: "web01"
+2026/10/01 09:12:44 [error] 1300#0: *9 access forbidden by rule, client: 198.51.100.7, server: web01, request: "GET /../../etc/passwd HTTP/1.1", host: "web01"

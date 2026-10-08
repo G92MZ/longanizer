@@ -1,0 +1,11 @@
+Carpeta de reglas Sigma de LogAnalyzer.
+
+Deja aquí tus .yml/.yaml (o súbelos desde la pestaña Sigma). Al "Cargar reglas"
+se leen todos recursivamente. Solo se APLICAN las de Linux y webserver cuyo
+logsource esté presente en el caso cargado; el resto se descartan.
+
+Los ficheros 01..06 de ejemplo están pensados para el incidente SSH de
+sample_logs; bórralos y pon los tuyos cuando quieras.
+
+Cambiar la carpeta por defecto: variable de entorno SIGMA_RULES_DIR, o escribe
+otra ruta en el campo de la pestaña Sigma.

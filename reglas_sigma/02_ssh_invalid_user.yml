@@ -1,0 +1,17 @@
+title: SSH - Invalid user attempts
+id: 10000000-0000-0000-0000-000000000002
+status: experimental
+description: SSH login against non-existent users; enumeration/brute force.
+author: ejemplo-loganalyzer
+level: medium
+tags:
+  - attack.credential_access
+  - attack.t1110
+logsource:
+  product: linux
+  service: auth
+detection:
+  keywords:
+    - 'invalid user'
+    - 'Invalid user'
+  condition: keywords
