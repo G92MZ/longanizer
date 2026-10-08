@@ -338,7 +338,7 @@ def _run_correlation(store, corr):
         "logsource": (lskey or "linux") + " · correlation",
         "count": sum(h[-2] for h in hits),
         "correlation": True,
-        "columns": gb + ["ventana (UTC)", "eventos"],
+        "columns": gb + ["window (UTC)", "events"],
         "hits": hits,
         "keywords": [],
         "yaml": _rule_full_yaml(corr),
