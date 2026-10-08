@@ -36,6 +36,26 @@ python run.py --db case.duckdb  # keep the case in a file instead of memory
 4. **📌 Triage** — mark events as pending / TP / FP with a note (saved inside the case file).
 5. **📄 Report** — export a self‑contained HTML case report to share.
 
+## 📸 In action
+
+> Loaded with the bundled `sample_logs/` — an SSH brute‑force, a web‑shell drop and a tool‑download‑and‑run chain.
+
+**Explorer — full timeline across every log type**
+
+![Explorer](docs/img/01-explorer.png)
+
+**Search — `field:value`, exact `=`, `/regex/` and `-exclude`**
+
+![Search](docs/img/02-search.png)
+
+**Overview — one‑glance dashboard (events, top IPs, top users)**
+
+![Dashboard](docs/img/03-dashboard.png)
+
+**Sigma — your rules run over the logs, with “what matched” per hit**
+
+![Sigma](docs/img/04-sigma.png)
+
 ## ✨ What's inside
 
 | | |
