@@ -207,12 +207,13 @@ def iter_iocs(general: str, hashes_text: str,
 
 
 # etiqueta legible por tipo (orden de presentación)
-IOC_TYPES = ["ipv4", "ipv6", "domain", "url", "email",
+IOC_TYPES = ["ipv4", "ipv6", "domain", "url", "email", "useragent",
              "sha256", "sha1", "md5", "imphash", "filepath",
              "registry", "pipe", "service", "task"]
 IOC_LABEL = {
     "ipv4": "IPv4", "ipv6": "IPv6", "domain": "Domains", "url": "URLs",
-    "email": "Emails", "sha256": "SHA256", "sha1": "SHA1", "md5": "MD5",
-    "imphash": "Imphash", "filepath": "File paths", "registry": "Registry keys",
-    "pipe": "Named pipes", "service": "Services", "task": "Scheduled tasks",
+    "email": "Emails", "useragent": "User agents", "sha256": "SHA256",
+    "sha1": "SHA1", "md5": "MD5", "imphash": "Imphash", "filepath": "File paths",
+    "registry": "Registry keys", "pipe": "Named pipes", "service": "Services",
+    "task": "Scheduled tasks",
 }

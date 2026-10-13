@@ -982,13 +982,11 @@ class EventStore:
         for r in rows:
             rid, ts = r[0], r[1]
             msg, raw, exe, path, ref, ua, host, prog, sip, extra = r[2:]
-            general = " ".join((msg, raw, exe, path, ref, ua, host, prog, sip, extra))
-            hashes_text = " ".join((msg, exe, path, ref, ua))
+            general = " ".join((msg, raw, exe, path, ref, host, prog, sip, extra))
+            hashes_text = " ".join((msg, exe, path, ref))
             seen = set()
-            for typ, val in X.iter_iocs(general, hashes_text, windows=False):
-                if (typ, val) in seen:
-                    continue
-                seen.add((typ, val))
+
+            def _bump(typ, val):
                 e = agg.get((typ, val))
                 if e is None:
                     agg[(typ, val)] = {"count": 1, "id": rid, "ts": ts}
@@ -996,6 +994,17 @@ class EventStore:
                     e["count"] += 1
                     if rid < e["id"]:
                         e["id"], e["ts"] = rid, ts
+
+            for typ, val in X.iter_iocs(general, hashes_text, windows=False):
+                if (typ, val) in seen:
+                    continue
+                seen.add((typ, val))
+                _bump(typ, val)
+            # user-agent: valor de campo completo (no por regex)
+            uav = (ua or "").strip()
+            if uav and uav != "-" and ("useragent", uav) not in seen:
+                seen.add(("useragent", uav))
+                _bump("useragent", uav)
         return self._group_iocs(agg, per_type, X, geo)
 
     @staticmethod

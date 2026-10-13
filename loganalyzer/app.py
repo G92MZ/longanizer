@@ -1088,6 +1088,12 @@ INDEX_HTML = r"""<!doctype html>
  .iocard.ioc-hit .iohead{border-left:4px solid #f85149}
  .iocard.ioc-clean .iohead{border-left:4px solid #3fb950;color:var(--muted)}
  .iocard .iohead{border-left:4px solid var(--accent)}
+ .iocard .iocxbody{display:none}
+ .iocard.open .iocxbody{display:block}
+ .iocxtoggle{cursor:pointer;user-select:none}
+ .iocard .caret{display:inline-block;width:11px;color:var(--muted);transition:transform .15s}
+ .iocard .caret::before{content:'\25B8'}
+ .iocard.open .caret{transform:rotate(90deg)}
  .iocxchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
  .iocxchip{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:3px 10px;font-size:12px;color:var(--fg);text-decoration:none}
  .iocxchip:hover{border-color:var(--accent)} .iocxchip b{color:var(--accent)}
@@ -1659,7 +1665,7 @@ LIMIT 50;</textarea>
 
  <!-- ============ IOC EXTRACTOR ============ -->
  <section id="iocx" class="panel">
-  <div class="help"><p>Automatically <b>extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, with how many events each one appears in. Public IPs are tagged with their class and <b>ASN · Org</b>. Click any value to jump to its first event; export the lot as CSV or JSON. <i>(This is the reverse of <b>IOC sweep</b>, where you paste your own IOCs.)</i></p></div>
+  <div class="help"><p>Automatically <b>extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, user agents, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, with how many events each one appears in. Public IPs are tagged with their class and <b>ASN · Org</b>. Click any value to jump to its first event; export the lot as CSV or JSON. <i>(This is the reverse of <b>IOC sweep</b>, where you paste your own IOCs.)</i></p></div>
   <div class="row">
    <button class="bigbtn" onclick="loadIocx()" id="iocx_btn">Extract IOCs</button>
    <button class="sec" onclick="iocxExport('csv')" id="iocx_csv" disabled>Download CSV</button>
@@ -1780,7 +1786,7 @@ LIMIT 50;</textarea>
 
    <h3>IOCs <span class="hintlbl">· extractor (discovered indicators)</span></h3>
    <ul>
-    <li><b>Extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, each with the number of events it appears in. Strict validation avoids false positives (e.g. an auditd <code>saddr=</code> hex blob is not reported as an MD5, and <code>payload.sh</code> is not a domain). Public IPs are tagged with their class and <b>ASN · Org</b>. Click a value to jump to its first event; export everything as CSV or JSON. It's the <b>reverse of IOC sweep</b>: you don't paste anything, the app discovers them.</li>
+    <li><b>Extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, user agents, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, each with the number of events it appears in. Strict validation avoids false positives (e.g. an auditd <code>saddr=</code> hex blob is not reported as an MD5, and <code>payload.sh</code> is not a domain). Public IPs are tagged with their class and <b>ASN · Org</b>. Click a value to jump to its first event; export everything as CSV or JSON. It's the <b>reverse of IOC sweep</b>: you don't paste anything, the app discovers them.</li>
    </ul>
 
    <h3>IOC sweep</h3>
@@ -2498,10 +2504,11 @@ async function loadIocx(){
   document.getElementById('iocx_csv').disabled=false; document.getElementById('iocx_json').disabled=false;
   if(!j.groups||!j.groups.length){ out.innerHTML='<p class="muted">No IOCs found in the loaded data.</p>'; btn.disabled=false; return; }
   let h='<div class="count">'+j.total+' distinct IOC(s) across '+j.groups.length+' type(s)</div>';
-  h+='<div class="iocxchips">'+j.groups.map(g=>'<a class="iocxchip" href="#iocx_'+g.type+'">'+esc(g.label)+' <b>'+g.total+'</b></a>').join('')+'</div>';
-  for(const g of j.groups){
-   h+='<div class="iocard" id="iocx_'+g.type+'"><div class="iohead"><b>'+esc(g.label)+'</b> <span class="muted">· '+g.total+(g.total>g.items.length?(' (showing '+g.items.length+')'):'')+'</span></div>';
-   h+='<div class="wrap"><table><thead><tr><th class="acts"></th><th>value</th><th>events</th><th></th></tr></thead><tbody>';
+  h+='<div class="iocxchips">'+j.groups.map(g=>'<a class="iocxchip" href="#iocx_'+g.type+'" onclick="iocxOpen(event,\''+g.type+'\')">'+esc(g.label)+' <b>'+g.total+'</b></a>').join('')+'</div>';
+  h+='<div class="row" style="margin:2px 0 6px"><button class="sec" onclick="iocxAll(1)">Expand all</button> <button class="sec" onclick="iocxAll(0)">Collapse all</button></div>';
+  j.groups.forEach(function(g,gi){
+   h+='<div class="iocard'+(gi===0?' open':'')+'" id="iocx_'+g.type+'"><div class="iohead iocxtoggle" onclick="this.parentNode.classList.toggle(\'open\')"><span class="caret"></span> <b>'+esc(g.label)+'</b> <span class="muted">· '+g.total+(g.total>g.items.length?(' (showing '+g.items.length+')'):'')+'</span></div>';
+   h+='<div class="iocxbody"><div class="wrap"><table><thead><tr><th class="acts"></th><th>value</th><th>events</th><th></th></tr></thead><tbody>';
    for(const it of g.items){
     let tag='';
     if(it.klass){ const cls=(it.klass==='external'?'ioctag-ext':(it.klass==='internal'?'ioctag-int':'ioctag-doc'));
@@ -2510,13 +2517,15 @@ async function loadIocx(){
       +'<td class="iocval" onclick="iocxGoto('+it.id+')" title="jump to first event">'+esc(it.value)+' '+tag+'</td>'
       +'<td>'+it.count+'</td><td><button class="revbtn" title="add first event to review" onclick="event.stopPropagation();addReview('+it.id+',this)" data-regla="'+esc('IOC '+g.label+': '+it.value)+'">&#43;</button></td></tr>';
    }
-   h+='</tbody></table></div></div>';
-  }
+   h+='</tbody></table></div></div></div>';
+  });
   out.innerHTML=h;
  }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
  btn.disabled=false;
 }
 function iocxGoto(id){ switchTab('explorer'); openCtx(id); }
+function iocxAll(open){ document.querySelectorAll('#iocx_out .iocard').forEach(c=>c.classList.toggle('open',!!open)); }
+function iocxOpen(ev,type){ if(ev)ev.preventDefault(); const c=document.getElementById('iocx_'+type); if(c){ c.classList.add('open'); c.scrollIntoView({block:'start'}); } }
 function iocxExport(fmt){
  if(!IOCX) return;
  if(fmt==='json'){ dlBlob('iocs.json', JSON.stringify(IOCX,null,2), 'application/json'); return; }

@@ -5,8 +5,8 @@
 **Forensic Linux log analyzer — parse once, query with SQL, hunt with Sigma.**
 
 Drop in the logs you pulled from a box, open the browser, and investigate:
-timeline, full‑text + field search, Sigma detections, GTFOBins, IOC sweep,
-GeoIP and a one‑click case report. Runs **100% offline**.
+timeline, full‑text + field search, Sigma detections, GTFOBins, IOC
+extraction & sweep, GeoIP and a one‑click case report. Runs **100% offline**.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-DuckDB-009688)
@@ -56,7 +56,7 @@ python run.py --db case.duckdb  # keep the case in a file instead of memory
 
 ![Sigma](docs/img/04-sigma.png)
 
-**IOCs — indicators discovered in the data, grouped by type and exportable**
+**IOCs — indicators discovered in the data, grouped into collapsible cards and exportable**
 
 ![IOCs](docs/img/05-iocs.png)
 
@@ -70,7 +70,7 @@ python run.py --db case.duckdb  # keep the case in a file instead of memory
 | 🧬 **auditd enrichment** | EXECVE stitched into full command lines, hex & `saddr` decoded (decoded values shown *in italics*) |
 | 🪤 **GTFOBins** | cross‑references binaries actually executed (incl. BSD appliance shell logs) with the catalog |
 | 🌐 **GeoIP / ASN** | public IPs tagged with country + Org/ISP (offline DB‑IP Lite) |
-| 🧷 **IOC extractor** | discovers the IOCs present in the data — IPs, domains, URLs, emails, hashes, file paths — grouped by type, ASN‑tagged, CSV/JSON export |
+| 🧷 **IOC extractor** | discovers the IOCs present in the data — IPs, domains, URLs, emails, user agents, hashes, file paths — in collapsible per‑type cards, ASN‑tagged, CSV/JSON export |
 | 🎯 **IOC sweep** | paste IPs/hashes/paths/users and sweep every log at once, export CSV |
 | ⏱️ **Live ingest** | progress by bytes with start / elapsed / ETA |
 | 🤖 **AI & MCP** | optional AI tab and an MCP server to query the case from Claude |
