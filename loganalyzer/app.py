@@ -430,6 +430,15 @@ def ioc_ep(req: IocReq):
                                                 per=min(req.per, 200)))}
 
 
+@app.get("/iocs")
+def iocs_extract_ep():
+    """Descubre los IOCs presentes en los datos cargados, agrupados por tipo."""
+    try:
+        return STORE.extract_iocs()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"IOC extraction error: {e}")
+
+
 @app.get("/network")
 def network_ep(ip: Optional[str] = None, port: Optional[str] = None,
                source: Optional[str] = None, event: Optional[str] = None):
@@ -1078,6 +1087,13 @@ INDEX_HTML = r"""<!doctype html>
  .iocard .iohead{padding:9px 12px;font-size:13px;background:var(--panel)}
  .iocard.ioc-hit .iohead{border-left:4px solid #f85149}
  .iocard.ioc-clean .iohead{border-left:4px solid #3fb950;color:var(--muted)}
+ .iocard .iohead{border-left:4px solid var(--accent)}
+ .iocxchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+ .iocxchip{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:3px 10px;font-size:12px;color:var(--fg);text-decoration:none}
+ .iocxchip:hover{border-color:var(--accent)} .iocxchip b{color:var(--accent)}
+ td.iocval{font-family:var(--mono);cursor:pointer} td.iocval:hover{color:var(--accent)}
+ .ioctag{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;margin-left:6px;vertical-align:1px}
+ .ioctag-ext{background:#5a1d1d;color:#ff9b9b} .ioctag-int{background:#1d3a24;color:#8fe0a6} .ioctag-doc{background:#2b2b40;color:#b7b7d8}
  .attgrid{display:flex;gap:10px;overflow-x:auto;padding-bottom:12px;align-items:flex-start}
  .attcol{min-width:158px;flex:0 0 auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px}
  .atthead{font-size:12px;font-weight:700;color:var(--fg);margin-bottom:8px;border-bottom:1px solid var(--border);padding-bottom:6px}
@@ -1311,6 +1327,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="tab active" data-tab="landing" onclick="switchTab('landing')">Load</div>
   <div class="tab hidden" data-tab="dash" data-optional onclick="switchTab('dash')">Overview</div>
   <div class="tab hidden" data-tab="explorer" data-optional onclick="switchTab('explorer')">Explorer</div>
+  <div class="tab hidden" data-tab="iocx" data-optional onclick="switchTab('iocx')">IOCs</div>
   <div class="tab hidden" data-tab="ioc" data-optional onclick="switchTab('ioc')">IOC sweep</div>
   <div class="tab hidden" data-tab="network" data-optional onclick="switchTab('network')">Network</div>
   <div class="tab hidden" data-tab="sql" data-optional onclick="switchTab('sql')">SQL</div>
@@ -1640,6 +1657,18 @@ LIMIT 50;</textarea>
   <div id="gtfo_list" class="hidden"></div>
  </section>
 
+ <!-- ============ IOC EXTRACTOR ============ -->
+ <section id="iocx" class="panel">
+  <div class="help"><p>Automatically <b>extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, with how many events each one appears in. Public IPs are tagged with their class and <b>ASN · Org</b>. Click any value to jump to its first event; export the lot as CSV or JSON. <i>(This is the reverse of <b>IOC sweep</b>, where you paste your own IOCs.)</i></p></div>
+  <div class="row">
+   <button class="bigbtn" onclick="loadIocx()" id="iocx_btn">Extract IOCs</button>
+   <button class="sec" onclick="iocxExport('csv')" id="iocx_csv" disabled>Download CSV</button>
+   <button class="sec" onclick="iocxExport('json')" id="iocx_json" disabled>Download JSON</button>
+   <span id="iocx_msg" class="muted"></span>
+  </div>
+  <div id="iocx_out"></div>
+ </section>
+
  <!-- ============ IOC SWEEP ============ -->
  <section id="ioc" class="panel">
   <div class="help"><p>Paste a list of <b>IOCs</b> — IPs, hashes, file paths, binaries, user names, domains — one per line (or comma/semicolon separated) and sweep all loaded logs at once. Each IOC shows its hit count and a sample; the match looks across the relevant fields <i>and</i> the raw log line. Click a row for its context, or &#10697; to copy the full event.</p></div>
@@ -1747,6 +1776,11 @@ LIMIT 50;</textarea>
     <li>The <b>Columns</b> button opens a panel of <b>chips</b>: each column shows as on (visible) or off (hidden) and toggles with a click. Shortcuts <b>Show/Hide all</b> and <b>Hide empty</b>, <b>reorder</b> with ◀ ▶ and back to <b>Original order</b>. Applies instantly and remembers your choice.</li>
     <li><b><code>extra</code> columns</b>: the keys of the <code>extra</code> JSON (auditd, or those auto-generated from a <code>logfmt</code>) appear in the panel tagged «extra»; they start hidden — enable them to see them as a column and sort by them.</li>
     <li><b>Show full timeline</b>: lists everything in chronological order (paged). You can bound it with the <b>from … to …</b> fields (UTC, format <code>2026-09-29</code> or <code>2026-09-29 08:00</code>) to avoid loading everything.</li>
+   </ul>
+
+   <h3>IOCs <span class="hintlbl">· extractor (discovered indicators)</span></h3>
+   <ul>
+    <li><b>Extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, each with the number of events it appears in. Strict validation avoids false positives (e.g. an auditd <code>saddr=</code> hex blob is not reported as an MD5, and <code>payload.sh</code> is not a domain). Public IPs are tagged with their class and <b>ASN · Org</b>. Click a value to jump to its first event; export everything as CSV or JSON. It's the <b>reverse of IOC sweep</b>: you don't paste anything, the app discovers them.</li>
    </ul>
 
    <h3>IOC sweep</h3>
@@ -1903,6 +1937,7 @@ function switchTab(t){
  if(t==='marks') loadMarks();
  if(t==='network' && !document.getElementById('nw_out').innerHTML) loadNetwork();
  if(t==='attack' && !document.getElementById('at_out').innerHTML) loadAttack();
+ if(t==='iocx' && !document.getElementById('iocx_out').innerHTML) loadIocx();
 }
 /* autocompletado de campos para la caja de búsqueda (sintaxis campo:valor) */
 const QFIELDS=['source','host','program','user','src_ip','src_port','exe','method','path','status','event','message','asn','org','ts'];
@@ -2450,6 +2485,49 @@ function csvTable(cols,rows,name){ if(!rows||!rows.length)return; const text=[co
 function csvObjs(headers,objs,name){ const text=[headers.map(csvCell).join(',')].concat(objs.map(o=>headers.map(k=>csvCell(o[k])).join(','))).join('\n'); dlCSV(name,text); }
 function trStart(){ const e=document.getElementById('tstart'); return e?e.value.trim():''; }
 function trEnd(){ const e=document.getElementById('tend'); return e?e.value.trim():''; }
+/* ================= IOC extractor (discovered IOCs) ================= */
+let IOCX=null;
+const IOCX_HINT={ipv4:'IPv4 addresses',ipv6:'IPv6 addresses',domain:'domains',url:'URLs',email:'emails',sha256:'SHA256',sha1:'SHA1',md5:'MD5',imphash:'imphash',filepath:'file paths',registry:'registry keys',pipe:'named pipes',service:'services',task:'scheduled tasks'};
+async function loadIocx(){
+ const out=document.getElementById('iocx_out'), msg=document.getElementById('iocx_msg'), btn=document.getElementById('iocx_btn');
+ msg.textContent='extracting…'; btn.disabled=true;
+ try{
+  const r=await fetch('/iocs'); const j=await r.json();
+  if(!r.ok){ msg.innerHTML='<span class="err">'+esc(j.detail||'error')+'</span>'; btn.disabled=false; return; }
+  IOCX=j; msg.textContent='';
+  document.getElementById('iocx_csv').disabled=false; document.getElementById('iocx_json').disabled=false;
+  if(!j.groups||!j.groups.length){ out.innerHTML='<p class="muted">No IOCs found in the loaded data.</p>'; btn.disabled=false; return; }
+  let h='<div class="count">'+j.total+' distinct IOC(s) across '+j.groups.length+' type(s)</div>';
+  h+='<div class="iocxchips">'+j.groups.map(g=>'<a class="iocxchip" href="#iocx_'+g.type+'">'+esc(g.label)+' <b>'+g.total+'</b></a>').join('')+'</div>';
+  for(const g of j.groups){
+   h+='<div class="iocard" id="iocx_'+g.type+'"><div class="iohead"><b>'+esc(g.label)+'</b> <span class="muted">· '+g.total+(g.total>g.items.length?(' (showing '+g.items.length+')'):'')+'</span></div>';
+   h+='<div class="wrap"><table><thead><tr><th class="acts"></th><th>value</th><th>events</th><th></th></tr></thead><tbody>';
+   for(const it of g.items){
+    let tag='';
+    if(it.klass){ const cls=(it.klass==='external'?'ioctag-ext':(it.klass==='internal'?'ioctag-int':'ioctag-doc'));
+      tag='<span class="ioctag '+cls+'">'+esc(it.klass)+'</span>'+(it.asn?(' <span class="muted">'+esc(it.asn)+(it.org?(' · '+esc(it.org)):'')+(it.country?(' · '+esc(it.country)):'')+'</span>'):''); }
+    h+='<tr class="hitrow"><td class="acts"><button class="copybtn" title="copy value" onclick="event.stopPropagation();copyText(\''+it.value.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\')">&#10697;</button></td>'
+      +'<td class="iocval" onclick="iocxGoto('+it.id+')" title="jump to first event">'+esc(it.value)+' '+tag+'</td>'
+      +'<td>'+it.count+'</td><td><button class="revbtn" title="add first event to review" onclick="event.stopPropagation();addReview('+it.id+',this)" data-regla="'+esc('IOC '+g.label+': '+it.value)+'">&#43;</button></td></tr>';
+   }
+   h+='</tbody></table></div></div>';
+  }
+  out.innerHTML=h;
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+ btn.disabled=false;
+}
+function iocxGoto(id){ switchTab('explorer'); openCtx(id); }
+function iocxExport(fmt){
+ if(!IOCX) return;
+ if(fmt==='json'){ dlBlob('iocs.json', JSON.stringify(IOCX,null,2), 'application/json'); return; }
+ let rows=[['type','value','events','class','asn','org','country','first_event_id','first_ts']];
+ for(const g of IOCX.groups) for(const it of g.items)
+   rows.push([g.type,it.value,it.count,it.klass||'',it.asn||'',it.org||'',it.country||'',it.id,it.ts||'']);
+ const csv=rows.map(r=>r.map(c=>{c=String(c==null?'':c); return /[",\n]/.test(c)?('"'+c.replace(/"/g,'""')+'"'):c;}).join(',')).join('\n');
+ dlBlob('iocs.csv', csv, 'text/csv');
+}
+function dlBlob(name,data,type){ try{ const b=new Blob([data],{type}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),1500);}catch(e){} }
+
 /* ================= IOC sweep ================= */
 let IOC_RES=[];
 function iocList(){ return (document.getElementById('ioc_in').value||'').split(/[\n,;]+/).map(s=>s.trim()).filter(Boolean); }

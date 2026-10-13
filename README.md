@@ -56,6 +56,10 @@ python run.py --db case.duckdb  # keep the case in a file instead of memory
 
 ![Sigma](docs/img/04-sigma.png)
 
+**IOCs — indicators discovered in the data, grouped by type and exportable**
+
+![IOCs](docs/img/05-iocs.png)
+
 ## ✨ What's inside
 
 | | |
@@ -66,6 +70,7 @@ python run.py --db case.duckdb  # keep the case in a file instead of memory
 | 🧬 **auditd enrichment** | EXECVE stitched into full command lines, hex & `saddr` decoded (decoded values shown *in italics*) |
 | 🪤 **GTFOBins** | cross‑references binaries actually executed (incl. BSD appliance shell logs) with the catalog |
 | 🌐 **GeoIP / ASN** | public IPs tagged with country + Org/ISP (offline DB‑IP Lite) |
+| 🧷 **IOC extractor** | discovers the IOCs present in the data — IPs, domains, URLs, emails, hashes, file paths — grouped by type, ASN‑tagged, CSV/JSON export |
 | 🎯 **IOC sweep** | paste IPs/hashes/paths/users and sweep every log at once, export CSV |
 | ⏱️ **Live ingest** | progress by bytes with start / elapsed / ETA |
 | 🤖 **AI & MCP** | optional AI tab and an MCP server to query the case from Claude |

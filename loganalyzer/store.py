@@ -960,6 +960,80 @@ class EventStore:
                                       "user": r[5], "detail": r[6]} for r in rows]})
         return out
 
+    # ------------------------------------------------------------------
+    # Extracción de IOCs: descubre los indicadores presentes en los datos
+    # (lo contrario del IOC sweep). Offline, con validación estricta.
+    # ------------------------------------------------------------------
+    def extract_iocs(self, per_type: int = 400) -> dict:
+        from . import ioc_extract as X
+        try:
+            from . import geoip as geo
+        except Exception:  # noqa: BLE001
+            geo = None
+        agg: dict = {}  # (type, value) -> {count, id, ts}
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT id, ts, "
+                "coalesce(message,''), coalesce(raw,''), coalesce(exe,''), "
+                "coalesce(path,''), coalesce(referer,''), coalesce(user_agent,''), "
+                "coalesce(host,''), coalesce(program,''), coalesce(src_ip,''), "
+                "coalesce(CAST(extra AS VARCHAR),'') "
+                "FROM events").fetchall()
+        for r in rows:
+            rid, ts = r[0], r[1]
+            msg, raw, exe, path, ref, ua, host, prog, sip, extra = r[2:]
+            general = " ".join((msg, raw, exe, path, ref, ua, host, prog, sip, extra))
+            hashes_text = " ".join((msg, exe, path, ref, ua))
+            seen = set()
+            for typ, val in X.iter_iocs(general, hashes_text, windows=False):
+                if (typ, val) in seen:
+                    continue
+                seen.add((typ, val))
+                e = agg.get((typ, val))
+                if e is None:
+                    agg[(typ, val)] = {"count": 1, "id": rid, "ts": ts}
+                else:
+                    e["count"] += 1
+                    if rid < e["id"]:
+                        e["id"], e["ts"] = rid, ts
+        return self._group_iocs(agg, per_type, X, geo)
+
+    @staticmethod
+    def _group_iocs(agg: dict, per_type: int, X, geo) -> dict:
+        by_type: dict = {}
+        for (typ, val), e in agg.items():
+            by_type.setdefault(typ, []).append((val, e))
+        groups = []
+        total = 0
+        geocache: dict = {}
+        for typ in X.IOC_TYPES:
+            items = by_type.get(typ)
+            if not items:
+                continue
+            items.sort(key=lambda kv: (-kv[1]["count"], kv[0]))
+            total += len(items)
+            out_items = []
+            for val, e in items[:per_type]:
+                it = {"value": val, "count": e["count"], "id": e["id"],
+                      "ts": _jsonable(e["ts"])}
+                if typ in ("ipv4", "ipv6"):
+                    it["klass"] = X.ip_class(val)
+                    if geo is not None and it["klass"] in ("external",):
+                        g = geocache.get(val)
+                        if g is None:
+                            try:
+                                g = geo.lookup(val)
+                            except Exception:  # noqa: BLE001
+                                g = {}
+                            geocache[val] = g
+                        it["asn"] = (f"AS{g['asn']}" if g.get("asn") else None)
+                        it["org"] = g.get("org")
+                        it["country"] = g.get("country_code")
+                out_items.append(it)
+            groups.append({"type": typ, "label": X.IOC_LABEL.get(typ, typ),
+                           "total": len(items), "items": out_items})
+        return {"total": total, "groups": groups}
+
     def reset(self) -> None:
         with self._lock:
             self._con.execute("DELETE FROM events")
