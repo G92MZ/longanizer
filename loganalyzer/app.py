@@ -1119,6 +1119,9 @@ INDEX_HTML = r"""<!doctype html>
  textarea{width:100%;min-height:100px;background:var(--panel);color:var(--fg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-family:var(--mono);font-size:13px;resize:vertical;line-height:1.55}
  input[type=text],input[type=number],select{background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
  input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(95,163,255,.22)}
+ input[type=file]{color:var(--muted);font-size:12px;max-width:100%;vertical-align:middle;margin-left:6px}
+ input[type=file]::file-selector-button{background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px 14px;font-weight:600;font-family:inherit;font-size:12px;cursor:pointer;margin-right:10px;transition:background .12s}
+ input[type=file]::file-selector-button:hover{background:var(--border)}
  .row{display:flex;gap:10px;align-items:center;margin:14px 0;flex-wrap:wrap}
  button{background:var(--accent);color:var(--ink);border:0;border-radius:8px;padding:10px 18px;font-weight:600;cursor:pointer;transition:background .12s}
  button:hover{background:var(--accent-hi)}
