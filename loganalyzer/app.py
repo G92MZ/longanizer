@@ -1646,6 +1646,7 @@ LIMIT 50;</textarea>
   <div class="row">
    <button onclick="sigmaRun()" id="sg_runbtn" disabled>Run rules</button>
    <button class="sec" onclick="sigmaListRules()" id="sg_listbtn" disabled>View applicable rules (SQL)</button>
+   <button class="sec" onclick="sigmaExportCsv()" id="sg_csvbtn" disabled style="margin-left:4px">&#8615; CSV</button>
    <progress id="sg_prog" max="100" value="0" style="display:none;width:180px;vertical-align:middle"></progress>
    <span id="sg_msg" class="muted"></span>
   </div>
@@ -3038,6 +3039,8 @@ async function sigmaRun(){
   prog.value=100; prog.style.display='none'; btn.disabled=false;
   if(!j){ msg.innerHTML='<span class="err">incomplete response</span>'; return; }
   msg.textContent='';
+  SIGMA_LAST=j;
+  document.getElementById('sg_csvbtn').disabled=!j.findings.length;
   let h='<div class="count">'+j.findings.length+' rules with findings · '+j.total_hits+' events · '
    +j.applied+' rules run of '+j.rules_total+'</div>';
   if(!j.findings.length){ h+='<p class="muted">No findings. (Rules ran but no match.)</p>'; }
@@ -3066,6 +3069,44 @@ async function sigmaRun(){
   }
   out.innerHTML=h;
  }catch(e){ prog.style.display='none'; btn.disabled=false; msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+let SIGMA_LAST=null;
+function sigmaExportCsv(){
+ if(!SIGMA_LAST||!SIGMA_LAST.findings) return;
+ const cols=[
+  'rule_title','rule_id','rule_level','rule_tags','rule_logsource',
+  'seq','event_id','ts','source','program','detail','src_file','what_matched','rule_yaml'
+ ];
+ const rows=[cols];
+ for(const f of SIGMA_LAST.findings){
+  const rtitle=f.title||'';
+  const rid=f.id||'';
+  const rlevel=f.level||'';
+  const rtags=(f.tags||[]).join(' | ');
+  const rls=f.logsource||'';
+  const ryaml=f.yaml||'';
+  if(f.correlation){
+   for(const row of f.hits){
+    const sid=row[row.length-1];
+    rows.push([rtitle,rid,rlevel,rtags,rls,
+     '',''+sid,'','','',
+     JSON.stringify(Object.fromEntries(f.columns.map((c,i)=>[c,row[i]]))),
+     '','',ryaml]);
+   }
+  } else {
+   // row = [seq, id, ts, source, program, detail, src_file, what_matched]
+   for(const row of f.hits){
+    rows.push([rtitle,rid,rlevel,rtags,rls,
+     ''+row[0],''+row[1],row[2]||'',row[3]||'',row[4]||'',
+     row[5]||'',row[6]||'',row[7]||'',ryaml]);
+   }
+  }
+ }
+ const csv=rows.map(r=>r.map(c=>{
+  c=String(c==null?'':c);
+  return /[,"\n\r]/.test(c)?('"'+c.replace(/"/g,'""')+'"'):c;
+ }).join(',')).join('\r\n');
+ dlBlob('sigma_findings.csv','\uFEFF'+csv,'text/csv;charset=utf-8');
 }
 function hlKw(text, kws){
  let h=esc(text);
