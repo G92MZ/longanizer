@@ -1097,6 +1097,12 @@ INDEX_HTML = r"""<!doctype html>
  .iocxchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
  .iocxchip{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:3px 10px;font-size:12px;color:var(--fg);text-decoration:none}
  .iocxchip:hover{border-color:var(--accent)} .iocxchip b{color:var(--accent)}
+ .iocxchip.active{background:var(--accent);color:var(--ink);border-color:var(--accent)}
+ .iocxchip.active b{color:var(--ink)}
+ #iocx_filters select{padding:4px 8px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:13px}
+ #iocx_filters input[type=search]{padding:4px 8px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:13px;width:220px}
+ .iocard.iocx-hidden{display:none}
+ tr.iocx-hidden{display:none}
  td.iocval{font-family:var(--mono);cursor:pointer} td.iocval:hover{color:var(--accent)}
  .ioctag{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;margin-left:6px;vertical-align:1px}
  .ioctag-ext{background:#5a1d1d;color:#ff9b9b} .ioctag-int{background:#1d3a24;color:#8fe0a6} .ioctag-doc{background:#2b2b40;color:#b7b7d8}
@@ -1674,6 +1680,14 @@ LIMIT 50;</textarea>
    <button class="sec" onclick="iocxExport('csv')" id="iocx_csv" disabled>Download CSV</button>
    <button class="sec" onclick="iocxExport('json')" id="iocx_json" disabled>Download JSON</button>
    <span id="iocx_msg" class="muted"></span>
+  </div>
+  <div class="row" id="iocx_filters" style="display:none;gap:8px;margin-top:4px;flex-wrap:wrap;align-items:center">
+   <select id="iocx_type" onchange="iocxFilter()">
+    <option value="">All types</option>
+   </select>
+   <input id="iocx_search" type="search" placeholder="filter values…" oninput="iocxFilter()">
+   <button class="sec" style="font-size:12px;padding:3px 10px" onclick="iocxFilterReset()">Reset</button>
+   <span id="iocx_filtermsg" class="muted" style="font-size:12px"></span>
   </div>
   <div id="iocx_out"></div>
  </section>
@@ -2499,26 +2513,41 @@ let IOCX=null;
 const IOCX_HINT={ipv4:'IPv4 addresses',ipv6:'IPv6 addresses',domain:'domains',url:'URLs',email:'emails',sha256:'SHA256',sha1:'SHA1',md5:'MD5',imphash:'imphash',filepath:'file paths',registry:'registry keys',pipe:'named pipes',service:'services',task:'scheduled tasks'};
 async function loadIocx(){
  const out=document.getElementById('iocx_out'), msg=document.getElementById('iocx_msg'), btn=document.getElementById('iocx_btn');
- msg.textContent='extracting…'; btn.disabled=true;
+ msg.textContent='extracting\u2026'; btn.disabled=true;
+ // reset filtros al extraer de nuevo
+ document.getElementById('iocx_type').value='';
+ document.getElementById('iocx_search').value='';
+ document.getElementById('iocx_filtermsg').textContent='';
  try{
   const r=await fetch('/iocs'); const j=await r.json();
   if(!r.ok){ msg.innerHTML='<span class="err">'+esc(j.detail||'error')+'</span>'; btn.disabled=false; return; }
   IOCX=j; msg.textContent='';
   document.getElementById('iocx_csv').disabled=false; document.getElementById('iocx_json').disabled=false;
   if(!j.groups||!j.groups.length){ out.innerHTML='<p class="muted">No IOCs found in the loaded data.</p>'; btn.disabled=false; return; }
+  // poblar el <select> con los tipos presentes
+  const sel=document.getElementById('iocx_type');
+  sel.innerHTML='<option value="">All types</option>';
+  j.groups.forEach(g=>{ const o=document.createElement('option'); o.value=g.type; o.textContent=g.label+' ('+g.total+')'; sel.appendChild(o); });
+  document.getElementById('iocx_filters').style.display='';
   let h='<div class="count">'+j.total+' distinct IOC(s) across '+j.groups.length+' type(s)</div>';
   h+='<div class="iocxchips">'+j.groups.map(g=>'<a class="iocxchip" href="#iocx_'+g.type+'" onclick="iocxOpen(event,\''+g.type+'\')">'+esc(g.label)+' <b>'+g.total+'</b></a>').join('')+'</div>';
   h+='<div class="row" style="margin:2px 0 6px"><button class="sec" onclick="iocxAll(1)">Expand all</button> <button class="sec" onclick="iocxAll(0)">Collapse all</button></div>';
   j.groups.forEach(function(g,gi){
-   h+='<div class="iocard'+(gi===0?' open':'')+'" id="iocx_'+g.type+'"><div class="iohead iocxtoggle" onclick="this.parentNode.classList.toggle(\'open\')"><span class="caret"></span> <b>'+esc(g.label)+'</b> <span class="muted">· '+g.total+(g.total>g.items.length?(' (showing '+g.items.length+')'):'')+'</span></div>';
+   h+='<div class="iocard'+(gi===0?' open':'')+'" id="iocx_'+g.type+'" data-ioctype="'+g.type+'">'
+     +'<div class="iohead iocxtoggle" onclick="this.parentNode.classList.toggle(\'open\')">'
+     +'<span class="caret"></span> <b>'+esc(g.label)+'</b> '
+     +'<span class="muted">\u00b7 <span class="iocx_count_'+g.type+'">'+g.total+'</span>'+(g.total>g.items.length?(' (showing '+g.items.length+')'):'')+'</span></div>';
    h+='<div class="iocxbody"><div class="wrap"><table><thead><tr><th class="acts"></th><th>value</th><th>events</th><th></th></tr></thead><tbody>';
    for(const it of g.items){
     let tag='';
     if(it.klass){ const cls=(it.klass==='external'?'ioctag-ext':(it.klass==='internal'?'ioctag-int':'ioctag-doc'));
-      tag='<span class="ioctag '+cls+'">'+esc(it.klass)+'</span>'+(it.asn?(' <span class="muted">'+esc(it.asn)+(it.org?(' · '+esc(it.org)):'')+(it.country?(' · '+esc(it.country)):'')+'</span>'):''); }
-    h+='<tr class="hitrow"><td class="acts"><button class="copybtn" title="copy value" onclick="event.stopPropagation();copyText(\''+it.value.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\')">&#10697;</button></td>'
+      tag='<span class="ioctag '+cls+'">'+esc(it.klass)+'</span>'+(it.asn?(' <span class="muted">'+esc(it.asn)+(it.org?(' \u00b7 '+esc(it.org)):'')+(it.country?(' \u00b7 '+esc(it.country)):'')+'</span>'):''); }
+    const safeVal=it.value.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    h+='<tr class="hitrow" data-iocval="'+esc(it.value).toLowerCase()+'">'
+      +'<td class="acts"><button class="copybtn" title="copy value" onclick="event.stopPropagation();copyText(\''+safeVal+'\')">&#10697;</button></td>'
       +'<td class="iocval" onclick="iocxGoto('+it.id+')" title="jump to first event">'+esc(it.value)+' '+tag+'</td>'
-      +'<td>'+it.count+'</td><td><button class="revbtn" title="add first event to review" onclick="event.stopPropagation();addReview('+it.id+',this)" data-regla="'+esc('IOC '+g.label+': '+it.value)+'">&#43;</button></td></tr>';
+      +'<td>'+it.count+'</td>'
+      +'<td><button class="revbtn" title="add first event to review" onclick="event.stopPropagation();addReview('+it.id+',this)" data-regla="'+esc('IOC '+g.label+': '+it.value)+'">&#43;</button></td></tr>';
    }
    h+='</tbody></table></div></div></div>';
   });
@@ -2527,6 +2556,45 @@ async function loadIocx(){
  btn.disabled=false;
 }
 function iocxGoto(id){ switchTab('explorer'); openCtx(id); }
+function iocxFilter(){
+ if(!IOCX) return;
+ const type=document.getElementById('iocx_type').value;
+ const q=(document.getElementById('iocx_search').value||'').toLowerCase().trim();
+ let visCards=0, visRows=0;
+ document.querySelectorAll('#iocx_out .iocard[data-ioctype]').forEach(card=>{
+  const ct=card.dataset.ioctype;
+  const typeMatch=(!type||ct===type);
+  if(!typeMatch){ card.classList.add('iocx-hidden'); return; }
+  card.classList.remove('iocx-hidden');
+  if(q){
+   let rowsVisible=0;
+   card.querySelectorAll('tbody tr').forEach(tr=>{
+    const val=tr.dataset.iocval||'';
+    if(val.includes(q)){ tr.classList.remove('iocx-hidden'); rowsVisible++; }
+    else tr.classList.add('iocx-hidden');
+   });
+   if(rowsVisible===0){ card.classList.add('iocx-hidden'); return; }
+   visRows+=rowsVisible;
+  } else {
+   card.querySelectorAll('tbody tr').forEach(tr=>tr.classList.remove('iocx-hidden'));
+  }
+  visCards++;
+ });
+ // actualizar chips activos
+ document.querySelectorAll('.iocxchip').forEach(chip=>{
+  const t=chip.getAttribute('href').replace('#iocx_','');
+  chip.classList.toggle('active', !!type && t===type);
+ });
+ // mensaje de estado
+ const fmsg=document.getElementById('iocx_filtermsg');
+ if(!type && !q){ fmsg.textContent=''; return; }
+ fmsg.textContent=visCards+' type(s)'+(q?' · '+visRows+' value(s)':'')+' matching';
+}
+function iocxFilterReset(){
+ document.getElementById('iocx_type').value='';
+ document.getElementById('iocx_search').value='';
+ iocxFilter();
+}
 function iocxAll(open){ document.querySelectorAll('#iocx_out .iocard').forEach(c=>c.classList.toggle('open',!!open)); }
 function iocxOpen(ev,type){ if(ev)ev.preventDefault(); const c=document.getElementById('iocx_'+type); if(c){ c.classList.add('open'); c.scrollIntoView({block:'start'}); } }
 function iocxExport(fmt){
