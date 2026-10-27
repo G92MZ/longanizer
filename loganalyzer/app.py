@@ -36,11 +36,20 @@ from pydantic import BaseModel
 from .schema import COLUMNS
 from .store import EventStore
 from .ingest import (ingest_file, ingest_path, iter_ingest_path, count_files,
-                     count_bytes, TEXT_PARSERS)
+                     count_bytes)
 from . import ai as ai_mod
-from . import gtfobins as gtfo_mod
 from . import geoip as geo_mod
 from . import report as report_mod
+
+# Categorías LOL (cada una con su propia pestaña, carpeta de reglas y el campo
+# por el que se agrupa su gráfica de indicadores).
+LOL_CATS = {
+    "lolbas":     {"label": "LOLBAS",     "indicator": "lower(regexp_extract(coalesce(image,original_filename,''),'([^\\\\/]+)$',1))", "ind_label": "binary"},
+    "loldrivers": {"label": "LOLDrivers", "indicator": "lower(regexp_extract(coalesce(image_loaded,image,''),'([^\\\\/]+)$',1))",       "ind_label": "driver"},
+    "lolrmm":     {"label": "LOLRMM",     "indicator": "lower(regexp_extract(coalesce(image,original_filename,''),'([^\\\\/]+)$',1))", "ind_label": "tool"},
+    "hijacklibs": {"label": "HijackLibs", "indicator": "lower(regexp_extract(coalesce(image_loaded,''),'([^\\\\/]+)$',1))",             "ind_label": "DLL"},
+    "lottunnels": {"label": "LOTTunnels", "indicator": "lower(regexp_extract(coalesce(image,original_filename,''),'([^\\\\/]+)$',1))", "ind_label": "tunnel tool"},
+}
 
 # pySigma es opcional: si no está, la pestaña Sigma se desactiva sin romper nada.
 try:
@@ -52,9 +61,31 @@ except Exception as _e:  # noqa: BLE001
     SIGMA_AVAILABLE = False
     SIGMA_IMPORT_ERROR = str(_e)
 
-SIGMA_DIR = os.environ.get("SIGMA_RULES_DIR", "reglas_sigma")
-SIGMA_RULES: list = []      # reglas cargadas en memoria
-SIGMA_INFO: dict = {}       # resumen de la última carga
+SIGMA_DIR = os.environ.get("SIGMA_RULES_DIR", "rules")
+# Conjuntos de reglas independientes: 'general' (pestaña Sigma) + una por LOL.
+RULESETS: dict[str, list] = {"general": []}
+RULE_INFO: dict[str, dict] = {}
+for _c in LOL_CATS:
+    RULESETS[_c] = []
+
+
+def _valid_set(name: str) -> str:
+    return name if name in RULESETS else "general"
+
+
+# Binarios de sistema / muy comunes contra los que se detecta masquerading
+# (cmd2.exe, svch0st.exe, scvhost.exe, lsass .exe, …) en la pestaña Lookalike.
+_SYSTEM_BINS = [
+    "cmd.exe", "powershell.exe", "pwsh.exe", "svchost.exe", "lsass.exe",
+    "services.exe", "winlogon.exe", "csrss.exe", "smss.exe", "wininit.exe",
+    "explorer.exe", "rundll32.exe", "regsvr32.exe", "mshta.exe", "wscript.exe",
+    "cscript.exe", "certutil.exe", "schtasks.exe", "taskhostw.exe", "conhost.exe",
+    "dllhost.exe", "spoolsv.exe", "msbuild.exe", "installutil.exe", "regasm.exe",
+    "regsvcs.exe", "bitsadmin.exe", "wmic.exe", "net.exe", "net1.exe",
+    "whoami.exe", "ipconfig.exe", "tasklist.exe", "ping.exe", "curl.exe",
+    "msiexec.exe", "notepad.exe", "calc.exe", "lsm.exe", "dwm.exe",
+    "ctfmon.exe", "runtimebroker.exe", "searchindexer.exe", "fontdrvhost.exe",
+]
 
 # Almacén. Comportamiento por defecto: NO se crea ningún fichero hasta que cargas
 # el primer log; en ese momento se crea un caso con fecha y hora en ./casos (así no
@@ -132,11 +163,8 @@ class QueryReq(BaseModel):
 
 class PathReq(BaseModel):
     path: str
-    type: Optional[str] = None
-    base_year: Optional[int] = None
-    user: Optional[str] = None
-    tz_offset_minutes: int = 0
-    catch_all: bool = False
+    ts_from: Optional[str] = None   # ISO datetime UTC, p.ej. '2025-01-01'
+    ts_to:   Optional[str] = None
 
 
 class SearchReq(BaseModel):
@@ -147,8 +175,9 @@ class SearchReq(BaseModel):
     offset: int = 0
     sort: Optional[str] = None
     desc: bool = False
-    start: Optional[str] = None
+    start: Optional[str] = None   # filtro temporal global (UTC)
     end: Optional[str] = None
+    eid: Optional[str] = None     # filtro por EventID
 
 
 class IocReq(BaseModel):
@@ -163,6 +192,7 @@ class FacetReq(BaseModel):
     source: Optional[str] = None
     start: Optional[str] = None
     end: Optional[str] = None
+    eid: Optional[str] = None
     limit: int = 20
 
 
@@ -174,6 +204,7 @@ class TimelineReq(BaseModel):
     end: Optional[str] = None     # ts máximo (UTC)
     sort: Optional[str] = None
     desc: bool = False
+    eid: Optional[str] = None     # filtro por EventID
 
 
 class ContextReq(BaseModel):
@@ -203,8 +234,8 @@ class MarkReq(BaseModel):
     estado: str = "pendiente"
     etiqueta: Optional[str] = None
     nota: Optional[str] = None
-    regla: Optional[str] = None
-    ctx_n: int = 10
+    regla: Optional[str] = None       # contexto de la regla si se marca desde una detección
+    ctx_n: int = 10                   # nº de eventos de contexto a congelar
 
 
 class MarkUpdateReq(BaseModel):
@@ -222,7 +253,6 @@ class MarkDeleteReq(BaseModel):
 def schema():
     return {
         "columns": [{"name": n, "type": t} for n, t in COLUMNS],
-        "log_types": list(TEXT_PARSERS),
     }
 
 
@@ -317,7 +347,7 @@ def query(req: QueryReq):
         raise HTTPException(status_code=400, detail=f"Error SQL: {e}")
 
 
-def _geo_enrich(result: dict, ip_fields=("src_ip",)) -> dict:
+def _geo_enrich(result: dict, ip_fields=("src_ip", "dst_ip")) -> dict:
     """Añade dos columnas calculadas a {columns, rows}: 'asn' (p.ej. AS3352) y
     'org' (nombre de la organización/ISP), resueltas por GeoIP a partir de la
     primera IP no vacía de la fila. Vacías si no hay base ASN o la IP es
@@ -361,47 +391,12 @@ def _geo_enrich(result: dict, ip_fields=("src_ip",)) -> dict:
 def search(req: SearchReq):
     try:
         return _geo_enrich(STORE.search(req.q, req.regex, req.source, req.limit,
-                            req.offset, req.sort, req.desc, req.start, req.end))
+                                        req.offset, req.sort, req.desc, req.start,
+                                        req.end, req.eid))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"Search error: {e}")
-
-
-def _facet_geo(req: "FacetReq") -> dict:
-    """Facetas de asn/org: facetea src_ip y agrega por ASN u Org vía GeoIP."""
-    base = STORE.facet("src_ip", req.q, req.regex, req.source,
-                       req.start, req.end, 500)
-    agg: dict[str, int] = {}
-    for row in base["values"]:
-        g = geo_mod.lookup(str(row["value"]))
-        if req.field == "asn":
-            key = ("AS" + str(g["asn"])) if g.get("asn") else None
-        else:
-            key = g.get("org")
-        if not key:
-            continue
-        agg[key] = agg.get(key, 0) + row["count"]
-    vals = sorted(({"value": k, "count": v} for k, v in agg.items()),
-                  key=lambda x: -x["count"])[:req.limit]
-    return {"field": req.field, "matched": base["matched"],
-            "distinct": len(agg), "values": vals}
-
-
-@app.post("/facets")
-def facets_ep(req: FacetReq):
-    try:
-        if req.field in ("asn", "org"):
-            return _facet_geo(req)
-        return STORE.facet(req.field, req.q, req.regex, req.source,
-                           req.start, req.end, req.limit)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/rawevent")
-def rawevent_ep(id: int):
-    return STORE.raw_event(id)
 
 
 _IOC_IPRE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
@@ -432,17 +427,50 @@ def ioc_ep(req: IocReq):
 
 @app.get("/iocs")
 def iocs_extract_ep():
-    """Descubre los IOCs presentes en los datos cargados, agrupados por tipo."""
+    """Descubre los IOCs presentes en los EVTX cargados, agrupados por tipo."""
     try:
         return STORE.extract_iocs()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"IOC extraction error: {e}")
 
 
+def _facet_geo(req: "FacetReq") -> dict:
+    """Facetas de asn/org: facetea src_ip/dst_ip y agrega por ASN u Org."""
+    base = STORE.facet("src_ip", req.q, req.regex, req.source,
+                       req.start, req.end, req.eid, 500)
+    agg: dict[str, int] = {}
+    for row in base["values"]:
+        g = geo_mod.lookup(str(row["value"]))
+        if req.field == "asn":
+            key = ("AS" + str(g["asn"])) if g.get("asn") else None
+        else:
+            key = g.get("org")
+        if not key:
+            continue
+        agg[key] = agg.get(key, 0) + row["count"]
+    vals = sorted(({"value": k, "count": v} for k, v in agg.items()),
+                  key=lambda x: -x["count"])[:req.limit]
+    return {"field": req.field, "matched": base["matched"],
+            "distinct": len(agg), "values": vals}
+
+
+@app.post("/facets")
+def facets_ep(req: FacetReq):
+    try:
+        if req.field in ("asn", "org"):
+            return _facet_geo(req)
+        return STORE.facet(req.field, req.q, req.regex, req.source,
+                           req.start, req.end, req.eid, req.limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/network")
-def network_ep(ip: Optional[str] = None, port: Optional[str] = None,
-               source: Optional[str] = None, event: Optional[str] = None):
-    return {"rows": STORE.network(ip=ip, port=port, source=source, event=event)}
+def network_ep(kind: Optional[str] = None, proto: Optional[str] = None,
+               image: Optional[str] = None, ip: Optional[str] = None,
+               port: Optional[str] = None):
+    return {"rows": STORE.network(kind=kind, proto=proto, image=image,
+                                  ip=ip, port=port)}
 
 
 @app.get("/attack")
@@ -452,21 +480,34 @@ def attack_ep():
 
 @app.post("/attack/stream")
 def attack_stream_ep():
-    """Igual que /attack pero emite progreso por regla (NDJSON) y, al final, la
-    matriz en el item {done:True, matrix:{...}} para que la barra avance."""
+    """Igual que /attack pero emite progreso por regla (NDJSON) acumulando el
+    avance a través de todos los sets cargados; al final {done:True, matrix}."""
     if not SIGMA_AVAILABLE:
         raise HTTPException(status_code=400, detail="pySigma not available")
-    if not SIGMA_RULES:
+    sets = [(name, rules) for name, rules in RULESETS.items() if rules]
+    if not sets:
         raise HTTPException(status_code=400, detail="No Sigma rules loaded.")
+    grand_total = sum(len(rules) for _n, rules in sets)
 
     def gen():
+        done = 0
+        all_findings: list[dict] = []
         try:
-            for item in sigma_engine.iter_run(STORE, SIGMA_RULES, limit_per_rule=50):
-                if item.get("done"):
-                    item = {"done": True,
-                            "matrix": _attack_build(item.get("findings", [])),
-                            "i": item.get("rules_total"), "total": item.get("rules_total")}
-                yield json.dumps(item, ensure_ascii=False, default=str) + "\n"
+            for setname, rules in sets:
+                for item in sigma_engine.iter_run(STORE, rules, limit_per_rule=50):
+                    if item.get("done"):
+                        for f in item.get("findings", []):
+                            f["_set"] = setname
+                        all_findings.extend(item.get("findings", []))
+                    else:
+                        cur = done + item.get("i", 0)
+                        yield json.dumps({"i": cur, "total": grand_total,
+                                          "found": len(all_findings) + item.get("found", 0)},
+                                         ensure_ascii=False) + "\n"
+                done += len(rules)
+            yield json.dumps({"done": True, "matrix": _attack_build(all_findings),
+                              "i": grand_total, "total": grand_total},
+                             ensure_ascii=False, default=str) + "\n"
         except Exception as e:  # noqa: BLE001
             yield json.dumps({"fatal": str(e)}, ensure_ascii=False) + "\n"
 
@@ -492,25 +533,32 @@ def _worst_level(a, b):
 
 
 def _attack_matrix():
-    """Matriz ATT&CK del caso a partir de los hits de Sigma (ruleset cargado)."""
+    """Agrega los hits de Sigma (todos los sets cargados) por técnica ATT&CK y
+    los organiza por táctica (columnas), para una matriz de cobertura del caso."""
     if not SIGMA_AVAILABLE:
         return {"tactics": [], "total_findings": 0, "error": "pySigma not available"}
-    if not SIGMA_RULES:
-        return {"tactics": [], "total_findings": 0}
-    try:
-        res = sigma_engine.run(STORE, SIGMA_RULES, limit_per_rule=50)
-    except Exception:  # noqa: BLE001
-        return {"tactics": [], "total_findings": 0}
-    return _attack_build(res.get("findings", []))
+    all_findings: list[dict] = []
+    for setname, rules in RULESETS.items():
+        if not rules:
+            continue
+        try:
+            res = sigma_engine.run(STORE, rules, limit_per_rule=50)
+        except Exception:  # noqa: BLE001
+            continue
+        for f in res.get("findings", []):
+            f["_set"] = setname
+            all_findings.append(f)
+    return _attack_build(all_findings)
 
 
 def _attack_build(findings):
-    """Construye la matriz ATT&CK a partir de una lista de findings de Sigma."""
+    """Construye la matriz ATT&CK a partir de findings (cada uno con '_set')."""
     import re as _re
     tac = {k: {"key": k, "label": lab, "techs": {}} for k, lab in _TACTICS}
     other = {"key": "other", "label": "(no tactic tag)", "techs": {}}
     nfind = 0
     for f in findings:
+        setname = f.get("_set", "")
         nfind += 1
         tags = [str(t).lower() for t in f.get("tags", [])]
         tactics = [t.split("attack.", 1)[1] for t in tags
@@ -522,19 +570,22 @@ def _attack_build(findings):
         for b in buckets:
             for tech in (techs or ["(no technique)"]):
                 e = b["techs"].setdefault(
-                    tech, {"tech": tech, "count": 0, "rules": [], "level": None, "ids": []})
+                    tech, {"tech": tech, "count": 0, "rules": [],
+                           "level": None, "ids": []})
                 e["count"] += f.get("count", 0)
                 e["rules"].append({"title": f.get("title"), "count": f.get("count"),
-                                   "level": f.get("level")})
+                                   "level": f.get("level"), "set": setname})
                 e["ids"] = (e["ids"] + sample_ids)[:10]
                 e["level"] = _worst_level(e["level"], f.get("level"))
     cols = []
     for k, _lab in _TACTICS:
         b = tac[k]
         if b["techs"]:
-            cols.append(dict(b, techs=sorted(b["techs"].values(), key=lambda x: -x["count"])))
+            b = dict(b, techs=sorted(b["techs"].values(), key=lambda x: -x["count"]))
+            cols.append(b)
     if other["techs"]:
-        cols.append(dict(other, techs=sorted(other["techs"].values(), key=lambda x: -x["count"])))
+        cols.append(dict(other, techs=sorted(other["techs"].values(),
+                                             key=lambda x: -x["count"])))
     return {"tactics": cols, "total_findings": nfind}
 
 
@@ -542,7 +593,8 @@ def _attack_build(findings):
 def timeline(req: TimelineReq):
     try:
         return _geo_enrich(STORE.timeline(req.source, req.limit, req.offset,
-                           req.start, req.end, req.sort, req.desc))
+                                          req.start, req.end, req.sort, req.desc,
+                                          req.eid))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -551,7 +603,7 @@ def timeline(req: TimelineReq):
 def context(req: ContextReq):
     try:
         return _geo_enrich(STORE.context(req.id, req.before, req.after,
-                           req.unit, req.seq))
+                                         req.unit, req.seq))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -576,7 +628,7 @@ def mcp_info():
     claude_json = (
         '{\n'
         '  "mcpServers": {\n'
-        '    "longanizer": {\n'
+        '    "loganalyzer-forense": {\n'
         '      "command": "python",\n'
         '      "args": ["-m", "loganalyzer.mcp_server"],\n'
         '      "env": { "DUCKDB_PATH": "' + db_show + '" }\n'
@@ -597,7 +649,7 @@ def mcp_info():
    (Settings &rarr; Developer &rarr; Edit Config) and add:</p>
    <pre>{esc_py(claude_json)}</pre>
    <h3>2 · (alternative) Claude Code</h3>
-   <pre>claude mcp add longanizer -e DUCKDB_PATH={db_show} -- python -m loganalyzer.mcp_server</pre>
+   <pre>claude mcp add loganalyzer-forense -e DUCKDB_PATH={db_show} -- python -m loganalyzer.mcp_server</pre>
    <h3>3 · Available tools</h3>
    <ul>
     <li><code>buscar_logs(q, regex?, source?, limit?)</code> — text/IOC or regex search.</li>
@@ -625,45 +677,48 @@ def ai_chat(req: AiReq):
         raise HTTPException(status_code=502, detail=f"Error con el endpoint de IA: {e}")
 
 
-@app.get("/sigma/status")
-def sigma_status():
-    return {"available": SIGMA_AVAILABLE, "error": SIGMA_IMPORT_ERROR,
-            "rules_dir": os.path.abspath(SIGMA_DIR), "loaded": len(SIGMA_RULES),
-            "info": SIGMA_INFO}
-
-
-def _sigma_reload(path: str) -> dict:
-    """Carga reglas desde `path`, deja un resumen con la vista de aplicabilidad."""
-    rules, errors = sigma_engine.load_rules_dir(path)
-    SIGMA_RULES[:] = rules
-    pv = sigma_engine.preview(STORE, rules)
-    global SIGMA_INFO
-    SIGMA_INFO = {"loaded": len(rules), "errors": errors, "preview": pv,
-                  "path": os.path.abspath(path)}
-    return SIGMA_INFO
-
-
-@app.post("/sigma/load")
-def sigma_load(req: SigmaLoadReq):
+def _need_sigma():
     if not SIGMA_AVAILABLE:
         raise HTTPException(status_code=503,
                             detail=f"pySigma not available: {SIGMA_IMPORT_ERROR}")
+
+
+@app.get("/sigma/status")
+def sigma_status(set: str = "general"):
+    s = _valid_set(set)
+    return {"available": SIGMA_AVAILABLE, "error": SIGMA_IMPORT_ERROR,
+            "set": s, "loaded": len(RULESETS[s]), "info": RULE_INFO.get(s, {})}
+
+
+def _reload_set(path: str, setname: str) -> dict:
+    rules, errors = sigma_engine.load_rules_dir(path)
+    RULESETS[setname] = rules
+    pv = sigma_engine.preview(STORE, rules)
+    RULE_INFO[setname] = {"loaded": len(rules), "errors": errors, "preview": pv,
+                          "path": os.path.abspath(path), "set": setname}
+    return RULE_INFO[setname]
+
+
+@app.post("/sigma/load")
+def sigma_load(req: SigmaLoadReq, set: str = "general"):
+    _need_sigma()
+    s = _valid_set(set)
     path = (req.path or SIGMA_DIR).strip()
     if not os.path.exists(path):
         raise HTTPException(status_code=404,
                             detail=f"Rules folder does not exist: {path}")
     try:
-        return _sigma_reload(path)
+        return _reload_set(path, s)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"Error loading rules: {e}")
 
 
 @app.post("/sigma/load/stream")
-def sigma_load_stream(req: SigmaLoadReq):
-    """Carga reglas fichero a fichero emitiendo progreso (NDJSON)."""
-    if not SIGMA_AVAILABLE:
-        raise HTTPException(status_code=503,
-                            detail=f"pySigma not available: {SIGMA_IMPORT_ERROR}")
+def sigma_load_stream(req: SigmaLoadReq, set: str = "general"):
+    """Carga reglas fichero a fichero emitiendo progreso (NDJSON), y al final
+    intenta un load conjunto para recuperar correlaciones cruzadas."""
+    _need_sigma()
+    s = _valid_set(set)
     path = (req.path or SIGMA_DIR).strip()
     if not os.path.exists(path):
         raise HTTPException(status_code=404,
@@ -685,79 +740,53 @@ def sigma_load_stream(req: SigmaLoadReq):
                                   "errors": len(errors)}) + "\n"
             bulk = sigma_engine.try_bulk_load(files) if files else []
             final = bulk if bulk is not None else rules
-            SIGMA_RULES[:] = final
+            RULESETS[s] = final
             pv = sigma_engine.preview(STORE, final)
-            global SIGMA_INFO
-            SIGMA_INFO = {"loaded": len(final), "errors": errors, "preview": pv,
-                          "path": os.path.abspath(path)}
+            RULE_INFO[s] = {"loaded": len(final), "errors": errors, "preview": pv,
+                            "path": os.path.abspath(path), "set": s}
             yield json.dumps({"done": True, "loaded": len(final),
                               "errors": errors, "preview": pv,
-                              "path": os.path.abspath(path)}, default=str) + "\n"
+                              "path": os.path.abspath(path), "set": s},
+                             default=str) + "\n"
         except Exception as e:  # noqa: BLE001
             yield json.dumps({"fatal": str(e)}) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
-@app.post("/sigma/upload")
-async def sigma_upload(files: list[UploadFile] = File(...)):
-    if not SIGMA_AVAILABLE:
-        raise HTTPException(status_code=503,
-                            detail=f"pySigma not available: {SIGMA_IMPORT_ERROR}")
-    os.makedirs(SIGMA_DIR, exist_ok=True)
-    saved = 0
-    for uf in files:
-        name = os.path.basename(uf.filename or "")
-        if not name.lower().endswith((".yml", ".yaml")):
-            continue
-        with open(os.path.join(SIGMA_DIR, name), "wb") as fh:
-            fh.write(await uf.read())
-        saved += 1
-    info = _sigma_reload(SIGMA_DIR)
-    info["saved"] = saved
-    return info
-
-
 @app.get("/sigma/rules")
-def sigma_rules_ep():
-    if not SIGMA_AVAILABLE:
-        raise HTTPException(status_code=503,
-                            detail=f"pySigma not available: {SIGMA_IMPORT_ERROR}")
+def sigma_rules_ep(set: str = "general"):
+    _need_sigma()
+    s = _valid_set(set)
     try:
-        return {"rules": sigma_engine.list_rules(STORE, SIGMA_RULES)}
+        return {"rules": sigma_engine.list_rules(STORE, RULESETS[s])}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Error listing rules: {e}")
 
 
 @app.post("/sigma/run")
-def sigma_run_ep():
-    if not SIGMA_AVAILABLE:
-        raise HTTPException(status_code=503,
-                            detail=f"pySigma not available: {SIGMA_IMPORT_ERROR}")
-    if not SIGMA_RULES:
-        raise HTTPException(status_code=400,
-                            detail="No rules loaded. Load a folder or upload .yml first.")
+def sigma_run_ep(set: str = "general"):
+    _need_sigma()
+    s = _valid_set(set)
+    if not RULESETS[s]:
+        raise HTTPException(status_code=400, detail="No rules loaded for this tab.")
     try:
-        return sigma_engine.run(STORE, SIGMA_RULES, limit_per_rule=200)
+        return sigma_engine.run(STORE, RULESETS[s], limit_per_rule=200)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Error running Sigma: {e}")
 
 
 @app.post("/sigma/run/stream")
-def sigma_run_stream_ep():
-    """Igual que /sigma/run pero emite progreso por regla en NDJSON: una línea
-    {"i","total","title","found","hits"} por regla y una final {"done":true,...}
-    con el resultado completo."""
-    if not SIGMA_AVAILABLE:
-        raise HTTPException(status_code=503,
-                            detail=f"pySigma not available: {SIGMA_IMPORT_ERROR}")
-    if not SIGMA_RULES:
-        raise HTTPException(status_code=400,
-                            detail="No rules loaded. Load a folder or upload .yml first.")
+def sigma_run_stream_ep(set: str = "general"):
+    """Ejecuta un conjunto emitiendo progreso por regla en NDJSON."""
+    _need_sigma()
+    s = _valid_set(set)
+    if not RULESETS[s]:
+        raise HTTPException(status_code=400, detail="No rules loaded for this tab.")
 
     def gen():
         try:
-            for item in sigma_engine.iter_run(STORE, SIGMA_RULES, limit_per_rule=200):
+            for item in sigma_engine.iter_run(STORE, RULESETS[s], limit_per_rule=200):
                 yield json.dumps(item, ensure_ascii=False, default=str) + "\n"
         except Exception as e:  # noqa: BLE001
             yield json.dumps({"fatal": str(e)}, ensure_ascii=False) + "\n"
@@ -766,75 +795,75 @@ def sigma_run_stream_ep():
 
 
 # ---------------------------------------------------------------------------
-# GTFOBins: catálogo de abuso de binarios + chequeo de ejecuciones en los logs
+# Pestañas LOL: ejecutar sus Sigma + gráfica "top indicador por eventos con hit"
 # ---------------------------------------------------------------------------
-@app.get("/gtfobins/status")
-def gtfobins_status_ep():
-    return gtfo_mod.status()
-
-
-@app.post("/gtfobins/refresh")
-def gtfobins_refresh_ep():
+def _lol_chart(cat: str) -> list[dict]:
+    """Agrega los eventos que hacen hit (cualquier regla del set) por indicador."""
+    rules = RULESETS.get(cat, [])
+    combined, _applied = sigma_engine.compile_combined_where(STORE, rules)
+    if not combined:
+        return []
+    ind = LOL_CATS[cat]["indicator"]
     try:
-        return gtfo_mod.refresh()
+        rows = STORE.lol_chart(combined, ind, limit=15)
+    except Exception:  # noqa: BLE001
+        return []
+    return [{"k": k, "n": n} for k, n in rows]
+
+
+@app.post("/lol/run")
+def lol_run_ep(cat: str):
+    _need_sigma()
+    if cat not in LOL_CATS:
+        raise HTTPException(status_code=404, detail="Unknown LOL category.")
+    if not RULESETS[cat]:
+        raise HTTPException(status_code=400,
+                            detail="No rules loaded for this tab. Pick a rules folder and load.")
+    try:
+        res = sigma_engine.run(STORE, RULESETS[cat], limit_per_rule=200)
+        res["chart"] = _lol_chart(cat)
+        res["indicator"] = LOL_CATS[cat]["ind_label"]
+        return res
     except Exception as e:  # noqa: BLE001
-        msg = getattr(e, "stderr", None) or str(e)
-        raise HTTPException(
-            status_code=500,
-            detail=("Could not update GTFOBins (neither via git nor download): "
-                    f"{str(msg)[:200]}. The bundled catalog is still available; to "
-                    "update manually, replace gtfobins_data/gtfobins.json."))
+        raise HTTPException(status_code=500, detail=f"Error running {cat}: {e}")
 
 
-@app.get("/gtfobins/list")
-def gtfobins_list_ep():
-    d = gtfo_mod.load()
-    if not d:
+@app.post("/lol/run/stream")
+def lol_run_stream_ep(cat: str):
+    """Como /lol/run pero emitiendo progreso por regla (NDJSON); al 'done' le
+    añade la gráfica del indicador para que la barra avance igual que en Sigma."""
+    _need_sigma()
+    if cat not in LOL_CATS:
+        raise HTTPException(status_code=404, detail="Unknown LOL category.")
+    if not RULESETS[cat]:
         raise HTTPException(status_code=400,
-                            detail="GTFOBins catalog not loaded. Click «Update catalog».")
-    return d
+                            detail="No rules loaded for this tab. Pick a rules folder and load.")
+
+    def gen():
+        try:
+            for item in sigma_engine.iter_run(STORE, RULESETS[cat], limit_per_rule=200):
+                if item.get("done"):
+                    item["chart"] = _lol_chart(cat)
+                    item["indicator"] = LOL_CATS[cat]["ind_label"]
+                yield json.dumps(item, ensure_ascii=False, default=str) + "\n"
+        except Exception as e:  # noqa: BLE001
+            yield json.dumps({"fatal": str(e)}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
-def _gtfobins_check_data() -> Optional[dict]:
-    """Cruce catálogo×ejecutados (reutilizado por el endpoint y el informe).
-    Devuelve None si el catálogo no está cargado."""
-    d = gtfo_mod.load()
-    if not d:
-        return None
-    bins = d.get("binaries", {})
-    cands = STORE.gtfobins_candidates()
-    matched = []
-    for c in cands:
-        name = c["bin"]
-        info = bins.get(name)
-        if not info:
-            continue
-        priv = STORE.gtfobins_privilege(name)
-        danger = (priv["via_sudo"] or priv["as_root"]
-                  or priv["escalation"] or priv.get("via_nssh"))
-        matched.append({
-            "bin": name, "count": c["count"],
-            "functions": info["functions"],
-            "samples": STORE.gtfobins_samples(name, 200),
-            "privilege": priv, "danger": danger,
-        })
-    matched.sort(key=lambda x: (0 if x["danger"] else 1, -x["count"]))
-    return {"matched": matched, "checked": len(cands), "catalog": d.get("count")}
-
-
-@app.post("/gtfobins/check")
-def gtfobins_check_ep():
-    res = _gtfobins_check_data()
-    if res is None:
-        raise HTTPException(status_code=400,
-                            detail="GTFOBins catalog not loaded. Click «Update catalog» first.")
-    return res
-
-
-@app.get("/gtfobins/samples")
-def gtfobins_samples_ep(bin: str, limit: int = 100000):
-    """Todas las apariciones de un binario concreto (para «Ver todos»)."""
-    return {"bin": bin, "samples": STORE.gtfobins_samples(bin, limit)}
+# ---------------------------------------------------------------------------
+# Lookalike / masquerading (distancia de Levenshtein sobre nombres de binario)
+# ---------------------------------------------------------------------------
+@app.get("/lookalike")
+def lookalike_ep(dist: int = 2, also_seen: int = 0):
+    refs = _SYSTEM_BINS
+    try:
+        res = STORE.lookalike(refs, max_dist=max(1, min(int(dist), 5)),
+                              also_seen=bool(also_seen))
+        return {"matches": res, "refs": len(refs), "dist": dist}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -843,14 +872,15 @@ def gtfobins_samples_ep(bin: str, limit: int = 100000):
 @app.get("/dashboard")
 def dashboard_ep():
     d = STORE.dashboard()
-    # enriquece las top IPs con interna/externa y país/ASN/ISP (si hay base)
-    for row in d.get("top_ip", []):
-        g = geo_mod.lookup(row["k"])
-        row["private"] = g["private"]
-        row["country"] = g["country"]
-        row["country_code"] = g["country_code"]
-        row["asn"] = g["asn"]
-        row["org"] = g["org"]
+    # enriquece las top IPs (origen y destino) con interna/externa y país/ASN/ISP
+    for key in ("top_src_ip", "top_dst_ip"):
+        for row in d.get(key, []):
+            g = geo_mod.lookup(row["k"])
+            row["private"] = g["private"]
+            row["country"] = g["country"]
+            row["country_code"] = g["country_code"]
+            row["asn"] = g["asn"]
+            row["org"] = g["org"]
     # Top ISP y Top países: agrupa el recuento por evento de TODAS las IPs
     from collections import Counter
     isp: Counter = Counter()
@@ -873,26 +903,40 @@ def dashboard_ep():
 def report_ep(download: int = 0):
     """Informe HTML autocontenido con todo el caso (colapsable)."""
     d = STORE.dashboard()
-    for row in d.get("top_ip", []):
-        g = geo_mod.lookup(row["k"])
-        row["private"] = g["private"]; row["country"] = g["country"]
-        row["country_code"] = g["country_code"]; row["asn"] = g["asn"]; row["org"] = g["org"]
+    for key in ("top_src_ip", "top_dst_ip"):
+        for row in d.get(key, []):
+            g = geo_mod.lookup(row["k"])
+            row["private"] = g["private"]; row["country"] = g["country"]
+            row["country_code"] = g["country_code"]; row["asn"] = g["asn"]; row["org"] = g["org"]
     sigma_res = None
-    if SIGMA_AVAILABLE and SIGMA_RULES:
-        try:
-            sigma_res = sigma_engine.run(STORE, SIGMA_RULES)
-        except Exception:  # noqa: BLE001
-            sigma_res = None
-    gtfo_res = _gtfobins_check_data()
+    lol_res = {}
+    if SIGMA_AVAILABLE:
+        if RULESETS["general"]:
+            try:
+                sigma_res = sigma_engine.run(STORE, RULESETS["general"])
+            except Exception:  # noqa: BLE001
+                sigma_res = None
+        for cat in LOL_CATS:
+            if RULESETS[cat]:
+                try:
+                    r = sigma_engine.run(STORE, RULESETS[cat])
+                    r["chart"] = _lol_chart(cat)
+                    lol_res[cat] = r
+                except Exception:  # noqa: BLE001
+                    pass
     marks = STORE.mark_list()
+    persist = STORE.persistence()
+    logons = STORE.logons()
     case = None if (AUTO_PENDING or DB_PATH == ":memory:") else os.path.basename(DB_PATH)
     html_doc = report_mod.build(
-        meta={"title": "Longanizer report",
+        meta={"title": "WinHound — Windows forensic report",
               "generated": report_mod.generated_now(), "case": case},
-        dashboard=d, sigma=sigma_res, gtfo=gtfo_res, marks=marks)
+        dashboard=d, sigma=sigma_res, lol=lol_res,
+        lol_labels={c: LOL_CATS[c]["label"] for c in LOL_CATS}, marks=marks,
+        persist=persist, logons=logons)
     headers = {}
     if download:
-        fn = "longanizer_report_" + time.strftime("%Y%m%d_%H%M", time.gmtime()) + ".html"
+        fn = "winhound_report_" + time.strftime("%Y%m%d_%H%M", time.gmtime()) + ".html"
         headers["Content-Disposition"] = f'attachment; filename="{fn}"'
     return HTMLResponse(content=html_doc, headers=headers)
 
@@ -907,6 +951,51 @@ def ipinfo_ep(ip: str):
 @app.get("/geoip/status")
 def geoip_status_ep():
     return geo_mod.status()
+
+
+# ---------------------------------------------------------------------------
+# Fase 2: vistas avanzadas Windows
+# ---------------------------------------------------------------------------
+@app.get("/proctree")
+def proctree_ep(pid: Optional[str] = None, guid: Optional[str] = None,
+                image: Optional[str] = None, node: Optional[str] = None):
+    pid = (pid or "").strip() or None
+    guid = (guid or "").strip() or None
+    image = (image or "").strip() or None
+    node = (node or "").strip() or None
+    if not (pid or guid or image or node):
+        return {"roots": [], "anchors": [], "need_anchor": True}
+    # node (id de evento exacto) ancla un único proceso: sin lista de anchors
+    if node:
+        return {"roots": STORE.process_tree(node=node), "anchors": [],
+                "need_anchor": False}
+    anchors = STORE.proc_anchors(pid=pid, guid=guid, image=image)
+    return {"roots": STORE.process_tree(pid=pid, guid=guid, image=image),
+            "anchors": anchors, "need_anchor": False}
+
+
+@app.get("/logons")
+def logons_ep(user: Optional[str] = None, logon_type: Optional[str] = None,
+              src_ip: Optional[str] = None, workstation: Optional[str] = None,
+              auth: Optional[str] = None, host: Optional[str] = None):
+    return {"logons": STORE.logons(user=user, logon_type=logon_type,
+                                   src_ip=src_ip, workstation=workstation,
+                                   auth=auth, host=host)}
+
+
+@app.get("/persistence")
+def persistence_ep():
+    return {"items": STORE.persistence()}
+
+
+@app.get("/powershell")
+def powershell_ep(q: Optional[str] = None):
+    return {"scripts": STORE.powershell(q=q), "q": (q or "").strip()}
+
+
+@app.get("/rawevent")
+def rawevent_ep(id: int):
+    return STORE.raw_event(id)
 
 
 # ---------------------------------------------------------------------------
@@ -952,24 +1041,34 @@ def geoip_refresh_ep():
                     "regardless, with no base."))
 
 
+def _parse_ts_filter(req):
+    import datetime as _dt
+    def _p(val):
+        if not val: return None
+        val = val.strip().replace(' ', 'T')
+        for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M', '%Y-%m-%d'):
+            try: return _dt.datetime.strptime(val, fmt).replace(tzinfo=_dt.timezone.utc)
+            except ValueError: pass
+        return None
+    return _p(getattr(req, 'ts_from', None)), _p(getattr(req, 'ts_to', None))
+
+
 @app.post("/ingest/path/stream")
 def ingest_path_stream_ep(req: PathReq):
-    """Igual que /ingest/path pero emite el resultado de cada fichero en NDJSON
-    según se procesa, para mostrar progreso en vivo. Primera línea: {"total": N}
-    (estimación de ficheros, sin expandir comprimidos)."""
+    """Ingesta EVTX de una ruta del servidor emitiendo el resultado de cada
+    fichero en NDJSON (progreso en vivo). Primera línea: {"total": N}."""
     if not os.path.exists(req.path):
         raise HTTPException(status_code=404, detail=f"Does not exist: {req.path}")
     _ensure_persistent()
 
+    ts_from, ts_to = _parse_ts_filter(req)
     def gen():
         yield json.dumps({"total": count_files(req.path),
                           "total_bytes": count_bytes(req.path)}) + "\n"
         byte_prog = [0]
         try:
-            for item in iter_ingest_path(STORE, req.path, req.type, req.base_year,
-                                         req.user, req.tz_offset_minutes,
-                                         skip_unknown=True, catch_all=req.catch_all,
-                                         byte_prog=byte_prog):
+            for item in iter_ingest_path(STORE, req.path, byte_prog=byte_prog,
+                                         ts_from=ts_from, ts_to=ts_to):
                 yield json.dumps(item, ensure_ascii=False, default=str) + "\n"
         except Exception as e:  # noqa: BLE001
             yield json.dumps({"fatal": str(e)}, ensure_ascii=False) + "\n"
@@ -982,10 +1081,9 @@ def ingest_path_ep(req: PathReq):
     if not os.path.exists(req.path):
         raise HTTPException(status_code=404, detail=f"Does not exist: {req.path}")
     _ensure_persistent()
+    ts_from, ts_to = _parse_ts_filter(req)
     try:
-        res = ingest_path(STORE, req.path, req.type, req.base_year, req.user,
-                          req.tz_offset_minutes, skip_unknown=True,
-                          catch_all=req.catch_all)
+        res = ingest_path(STORE, req.path, ts_from=ts_from, ts_to=ts_to)
         return {"ingested": res, "stats": STORE.stats()}
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e))
@@ -994,35 +1092,37 @@ def ingest_path_ep(req: PathReq):
 @app.post("/ingest/upload")
 async def ingest_upload(
     files: list[UploadFile] = File(...),
-    type: Optional[str] = Form(None),
-    base_year: Optional[int] = Form(None),
-    user: Optional[str] = Form(None),
-    tz_offset_minutes: int = Form(0),
     relpaths: list[str] = Form(default=[]),
-    catch_all: bool = Form(False),
+    ts_from_str: Optional[str] = Form(None),
+    ts_to_str:   Optional[str] = Form(None),
 ):
     _ensure_persistent()
+    import datetime as _dt
+    def _pf(v):
+        if not v: return None
+        v=v.strip().replace(' ','T')
+        for fmt in ('%Y-%m-%dT%H:%M:%S','%Y-%m-%dT%H:%M','%Y-%m-%d'):
+            try: return _dt.datetime.strptime(v,fmt).replace(tzinfo=_dt.timezone.utc)
+            except ValueError: pass
+        return None
+    _ts_from = _pf(ts_from_str); _ts_to = _pf(ts_to_str)
     results = []
     for i, uf in enumerate(files):
-        suffix = os.path.basename(uf.filename or "upload")
-        # ruta relativa original (carpeta subida) si el cliente la envió
+        suffix = os.path.basename(uf.filename or "upload.evtx")
         label = relpaths[i] if i < len(relpaths) and relpaths[i] else suffix
         with tempfile.NamedTemporaryFile(delete=False, suffix="_" + suffix) as tmp:
             tmp.write(await uf.read())
             tmp_path = tmp.name
+        real = None
         try:
-            # renombrar para conservar pistas del nombre original en la detección
             real = os.path.join(os.path.dirname(tmp_path), suffix)
             os.replace(tmp_path, real)
-            # ingest_path soporta archivos comprimidos subidos (.tar.gz/.zip/.gz...);
-            # skip_unknown=True -> un no-log se marca 'saltado' en vez de error
-            results.extend(ingest_path(STORE, real, type, base_year, user,
-                                       tz_offset_minutes, skip_unknown=True,
-                                       label=label, catch_all=catch_all))
+            results.extend(ingest_path(STORE, real, label=label,
+                                       ts_from=_ts_from, ts_to=_ts_to))
         except Exception as e:  # noqa: BLE001
             results.append({"file": label, "error": str(e)})
         finally:
-            for p in (tmp_path, locals().get("real", "")):
+            for p in (tmp_path, real):
                 if p and os.path.exists(p):
                     os.unlink(p)
     return {"ingested": results, "stats": STORE.stats()}
@@ -1036,8 +1136,8 @@ def index():
 INDEX_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Longanizer</title>
-<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'&gt;&lt;path d='M6.2 18.4 C10 21.2 17.4 19.6 18.6 6.6' fill='none' stroke='%23141414' stroke-width='7.8' stroke-linecap='round'/&gt;&lt;path d='M6.2 18.4 C10 21.2 17.4 19.6 18.6 6.6' fill='none' stroke='%23e0485a' stroke-width='5.6' stroke-linecap='round'/&gt;&lt;path d='M7.4 16.8 C10 18.6 15.4 17.6 16.8 8' fill='none' stroke='%23f58a95' stroke-width='1.6' stroke-linecap='round' opacity='.85'/&gt;&lt;/svg&gt;">
+<title>WinHound</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'&gt;&lt;text y='14' font-size='14'&gt;&#128269;&lt;/text&gt;&lt;/svg&gt;">
 <style>
  :root{--bg:#132743;--panel:#1b3357;--panel2:#23416b;--border:#345681;--fg:#eaf1fb;--muted:#a3b6d4;--accent:#5fa3ff;--accent-hi:#83baff;--ink:#07192f;--hit:#4a3d12;--radius:12px;--shadow:0 2px 10px rgba(0,0,0,.28);--mono:ui-monospace,SFMono-Regular,Menlo,monospace}
  *{box-sizing:border-box}
@@ -1045,80 +1145,23 @@ INDEX_HTML = r"""<!doctype html>
  header{padding:18px 28px;border-bottom:1px solid var(--border);display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;background:linear-gradient(180deg,#1d3860,#132743)}
  h1{font-size:19px;margin:0;letter-spacing:.2px}
  .muted{color:var(--muted);font-size:12px}
- .xdec em,em.xdec{font-style:italic}
  .qacwrap{position:relative}
  .qac{position:absolute;left:0;right:0;top:100%;z-index:40;background:var(--panel2);border:1px solid var(--border);border-top:0;border-radius:0 0 8px 8px;max-height:260px;overflow:auto;box-shadow:var(--shadow)}
  .qac.hidden{display:none}
  .qacit{padding:5px 10px;font-family:var(--mono);font-size:12px;cursor:pointer;color:var(--fg)}
  .qacit.on,.qacit:hover{background:var(--accent);color:var(--ink)}
- td.xdec em{font-style:italic;color:var(--accent,#7fd1ff);text-decoration:underline dotted;text-underline-offset:2px}
  main{padding:28px;max-width:1500px;margin:0 auto}
  .tabs{display:flex;gap:6px;margin-bottom:26px;flex-wrap:wrap;border-bottom:1px solid var(--border)}
  .tab{background:transparent;color:var(--muted);border:1px solid transparent;border-bottom:0;border-radius:9px 9px 0 0;padding:11px 20px;cursor:pointer;font-weight:500;margin-bottom:-1px}
  .tab:hover{color:var(--fg);background:var(--panel)}
  .tab.active{background:var(--panel);color:var(--accent);border-color:var(--border);font-weight:600}
+ /* sub-navegación (p.ej. agrupar Sigma + LOL + Lookalike bajo un padre) */
  .subnav{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:-18px 0 24px;padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:10px}
  .subnav .subcap{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-right:4px}
  .subnav .subtab{color:var(--muted);padding:7px 15px;border-radius:7px;cursor:pointer;font-size:13px;font-weight:500}
  .subnav .subtab:hover{color:var(--fg);background:var(--panel2)}
  .subnav .subtab.active{background:var(--accent);color:var(--ink);font-weight:600}
- .c-copy{width:30px;text-align:center;padding:0 2px}
- .copybtn{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:14px;padding:3px 6px;border-radius:6px;line-height:1}
- .copybtn:hover{color:var(--accent);background:var(--panel2)}
- .copybtn.copied{color:#51d88a}
- td.acts,th.acts{white-space:nowrap;width:1%;padding:2px 4px}
- .actinl{margin-right:8px;white-space:nowrap}
- .revbtn,.rawbtn{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 5px;border-radius:6px;line-height:1}
- .revbtn:hover{color:#e3b341;background:var(--panel2)} .revbtn.copied{color:#51d88a}
- .rawbtn:hover{color:var(--accent);background:var(--panel2)} .rawbtn.on{color:var(--accent)}
- .rawpre{background:var(--ink);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:4px 0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12px;max-height:360px;overflow:auto}
- tr.rawrow td{background:var(--bg);padding:6px 10px}
- details.ruleyaml{margin:2px 0 8px} details.ruleyaml>summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:600;padding:4px 0}
- .rawmodal{position:fixed;inset:0;background:rgba(3,10,22,.72);display:flex;align-items:center;justify-content:center;z-index:50;padding:24px}
- .rawmodal.hidden{display:none}
- .rawmbox{background:var(--panel);border:1px solid var(--border);border-radius:12px;max-width:900px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:var(--shadow)}
- .rawmbar{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);font-weight:600;font-size:13px}
- .rawmbox .rawpre{margin:0;border:0;border-radius:0 0 12px 12px;max-height:none;overflow:auto;flex:1}
- .mkctx{background:var(--ink);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;white-space:pre-wrap;font-family:var(--mono);font-size:11px;max-height:220px;overflow:auto;color:var(--muted)}
- .mkrule{display:inline-block;background:var(--panel2);border-radius:6px;padding:1px 8px;margin-left:6px;font-size:11px;color:var(--accent-hi)}
- details.mkctxd{margin-top:6px} details.mkctxd>summary{cursor:pointer;color:var(--muted);font-size:11px}
- .xcsv{font-size:11px;padding:3px 10px;margin-left:8px;vertical-align:middle}
- .iocard{border:1px solid var(--border);border-radius:10px;margin:12px 0;overflow:hidden}
- .iocard .iohead{padding:9px 12px;font-size:13px;background:var(--panel)}
- .iocard.ioc-hit .iohead{border-left:4px solid #f85149}
- .iocard.ioc-clean .iohead{border-left:4px solid #3fb950;color:var(--muted)}
- .iocard .iohead{border-left:4px solid var(--accent)}
- .iocard .iocxbody{display:none}
- .iocard.open .iocxbody{display:block}
- .iocxtoggle{cursor:pointer;user-select:none}
- .iocard .caret{display:inline-block;width:11px;color:var(--muted);transition:transform .15s}
- .iocard .caret::before{content:'\25B8'}
- .iocard.open .caret{transform:rotate(90deg)}
- .iocxchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
- .iocxchip{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:3px 10px;font-size:12px;color:var(--fg);text-decoration:none}
- .iocxchip:hover{border-color:var(--accent)} .iocxchip b{color:var(--accent)}
- .iocxchip.active{background:var(--accent);color:var(--ink);border-color:var(--accent)}
- .iocxchip.active b{color:var(--ink)}
- #iocx_filters select{padding:4px 8px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:13px}
- #iocx_filters input[type=search]{padding:4px 8px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:13px;width:220px}
- .iocard.iocx-hidden{display:none}
- tr.iocx-hidden{display:none}
- td.iocval{font-family:var(--mono);cursor:pointer} td.iocval:hover{color:var(--accent)}
- .ioctag{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;margin-left:6px;vertical-align:1px}
- .ioctag-ext{background:#5a1d1d;color:#ff9b9b} .ioctag-int{background:#1d3a24;color:#8fe0a6} .ioctag-doc{background:#2b2b40;color:#b7b7d8}
- .attgrid{display:flex;gap:10px;overflow-x:auto;padding-bottom:12px;align-items:flex-start}
- .attcol{min-width:158px;flex:0 0 auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px}
- .atthead{font-size:12px;font-weight:700;color:var(--fg);margin-bottom:8px;border-bottom:1px solid var(--border);padding-bottom:6px}
- .atttech{display:flex;justify-content:space-between;gap:8px;align-items:center;background:var(--panel2);border-left:3px solid var(--accent);border-radius:6px;padding:6px 8px;margin-bottom:6px;cursor:pointer;font-size:12px}
- .atttech:hover{filter:brightness(1.18)}
- .atttech .attt{font-family:var(--mono);font-weight:600;flex:1}
- .atttech .attn{background:rgba(0,0,0,.28);border-radius:9px;padding:0 7px;font-weight:700;font-size:11px}
- .atttechrev{order:3;margin-left:4px}
- .atttech.sev-critical{border-left-color:#f85149}
- .atttech.sev-high{border-left-color:#db6d28}
- .atttech.sev-medium,.atttech.sev-med{border-left-color:#d29922}
- .atttech.sev-low{border-left-color:#3fb950}
- .atttech.sev-info,.atttech.sev-informational{border-left-color:#58a6ff}
+ .tab.parent.active{color:var(--accent)}
  .panel{display:none}
  .panel.active{display:block}
  section.panel{padding-top:2px}
@@ -1205,7 +1248,6 @@ INDEX_HTML = r"""<!doctype html>
  .gbcode{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:6px 0;font-family:var(--mono);font-size:12px;white-space:pre-wrap;overflow:auto;user-select:all}
  .gbcomment{font-size:11px;color:var(--muted);margin:4px 0 2px}
  .gbsamph{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:10px 0 2px}
- .gbtrunc{font-weight:400;text-transform:none;letter-spacing:0;opacity:.8}
  .gblist{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
  .gbchip{font-family:var(--mono);font-size:12px;border:1px solid var(--border);border-radius:8px;padding:6px 10px;background:var(--bg);cursor:pointer}
  .gbchip:hover{border-color:var(--accent);background:var(--panel2)}
@@ -1255,6 +1297,25 @@ INDEX_HTML = r"""<!doctype html>
  .mkact{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
  .mkfilt{cursor:pointer;border:1px solid var(--border);border-radius:999px;padding:4px 13px;font-size:12px;background:var(--panel)}
  .mkfilt.active{background:var(--accent);color:var(--ink);font-weight:600;border-color:var(--accent)}
+ /* Phase 2 */
+ .ptree{font-family:var(--mono);font-size:12px}
+ .ptnode,.ptleaf{margin:2px 0 2px 0}
+ .ptree details{border:0;background:transparent;border-radius:0;margin:0;padding:0 0 0 16px;box-shadow:none}
+ .ptree>.ptnode,.ptree>.ptleaf{padding-left:0}
+ .ptree summary{list-style:none;padding:3px 0;cursor:pointer}
+ .ptree summary::-webkit-details-marker{display:none}
+ .ptree summary::before{content:"\25B6";color:var(--accent);font-size:9px;margin-right:6px;display:inline-block}
+ .ptree details[open]>summary::before{transform:rotate(90deg)}
+ .ptleaf{padding:3px 0 3px 14px}
+ .ptbin{color:var(--accent);font-weight:700;cursor:pointer}
+ .ptbin:hover{text-decoration:underline}
+ .ptpid{color:var(--muted);margin-left:8px;font-size:11px}
+ .ptcmd{color:var(--fg);margin-left:10px}
+ .ptmeta{margin-left:10px}
+ .ptrow.pthit{background:rgba(88,166,255,.16);border-radius:4px;padding:1px 4px;outline:1px solid rgba(88,166,255,.5)}
+ .ptbin.pthit{color:#ffd166}
+ tr.failrow td{background:rgba(248,81,73,.12)}
+ tr.failrow td:first-child{border-left:3px solid #f85149}
  .err{color:#ff7b72;font-family:var(--mono);white-space:pre-wrap}
  .pill{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:4px 12px;font-size:12px}
  a{color:var(--accent)}
@@ -1325,6 +1386,70 @@ INDEX_HTML = r"""<!doctype html>
  .st-arc{color:var(--muted);font-weight:600}
  .bigbtn{font-size:14px;padding:12px 22px}
  .hidden{display:none}
+ mark{background:#fde68a;color:#1e293b;padding:0 2px;border-radius:2px}
+ details.ingsec{margin-top:14px}
+ details.ingsec>summary{cursor:pointer;font-size:13px;font-weight:600;margin:4px 0 6px;user-select:none}
+ .ptsrc{display:inline-block;font-size:10px;font-weight:600;padding:1px 6px;border-radius:9px;margin:0 6px;background:var(--chip,#1f3a5f);color:var(--muted);vertical-align:middle}
+ .c-copy{width:30px;text-align:center;padding:0 2px}
+ .copybtn{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:14px;padding:3px 6px;border-radius:6px;line-height:1}
+ .copybtn:hover{color:var(--accent);background:var(--panel2)}
+ .copybtn.copied{color:#51d88a}
+ td.acts,th.acts{white-space:nowrap;width:1%;padding:2px 4px}
+ .actinl{margin-right:8px;white-space:nowrap}
+ .revbtn,.rawbtn{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 5px;border-radius:6px;line-height:1}
+ .revbtn:hover{color:#e3b341;background:var(--panel2)} .revbtn.copied{color:#51d88a}
+ .rawbtn:hover{color:var(--accent);background:var(--panel2)} .rawbtn.on{color:var(--accent)}
+ .rawpre{background:var(--ink);border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin:4px 0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12px;max-height:360px;overflow:auto}
+ tr.rawrow td{background:var(--bg);padding:6px 10px}
+ details.ruleyaml{margin:2px 0 8px} details.ruleyaml>summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:600;padding:4px 0}
+ .rawmodal{position:fixed;inset:0;background:rgba(3,10,22,.72);display:flex;align-items:center;justify-content:center;z-index:50;padding:24px}
+ .rawmodal.hidden{display:none}
+ .rawmbox{background:var(--panel);border:1px solid var(--border);border-radius:12px;max-width:900px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:var(--shadow)}
+ .rawmbar{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);font-weight:600;font-size:13px}
+ .rawmbox .rawpre{margin:0;border:0;border-radius:0 0 12px 12px;max-height:none;overflow:auto;flex:1}
+ .mkctx{background:var(--ink);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;white-space:pre-wrap;font-family:var(--mono);font-size:11px;max-height:220px;overflow:auto;color:var(--muted)}
+ .mkrule{display:inline-block;background:var(--panel2);border-radius:6px;padding:1px 8px;margin-left:6px;font-size:11px;color:var(--accent-hi)}
+ details.mkctxd{margin-top:6px} details.mkctxd>summary{cursor:pointer;color:var(--muted);font-size:11px}
+ .xcsv{font-size:11px;padding:3px 10px;margin-left:8px;vertical-align:middle}
+ /* ATT&CK matrix */
+ .attgrid{display:flex;gap:10px;overflow-x:auto;padding-bottom:12px;align-items:flex-start}
+ .attcol{min-width:158px;flex:0 0 auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:8px}
+ .atthead{font-size:12px;font-weight:700;color:var(--fg);margin-bottom:8px;border-bottom:1px solid var(--border);padding-bottom:6px}
+ .atttech{display:flex;justify-content:space-between;gap:8px;align-items:center;background:var(--panel2);border-left:3px solid var(--accent);border-radius:6px;padding:6px 8px;margin-bottom:6px;cursor:pointer;font-size:12px}
+ .atttech:hover{filter:brightness(1.18)}
+ .atttech .attt{font-family:var(--mono);font-weight:600;flex:1}
+ .atttech .attn{background:rgba(0,0,0,.28);border-radius:9px;padding:0 7px;font-weight:700;font-size:11px}
+ .atttechrev{order:3;margin-left:4px}
+ .atttech.sev-critical{border-left-color:#f85149}
+ .atttech.sev-high{border-left-color:#db6d28}
+ .atttech.sev-medium,.atttech.sev-med{border-left-color:#d29922}
+ .atttech.sev-low{border-left-color:#3fb950}
+ .atttech.sev-info,.atttech.sev-informational{border-left-color:#58a6ff}
+ /* IOC sweep */
+ .iocard{border:1px solid var(--border);border-radius:10px;margin:12px 0;overflow:hidden}
+ .iocard .iohead{padding:9px 12px;font-size:13px;background:var(--panel)}
+ .iocard.ioc-hit .iohead{border-left:4px solid #f85149}
+ .iocard.ioc-clean .iohead{border-left:4px solid #3fb950;color:var(--muted)}
+ .iocard .iohead{border-left:4px solid var(--accent)}
+ .iocard .iocxbody{display:none}
+ .iocard.open .iocxbody{display:block}
+ .iocxtoggle{cursor:pointer;user-select:none}
+ .iocard .caret{display:inline-block;width:11px;color:var(--muted);transition:transform .15s}
+ .iocard .caret::before{content:'\25B8'}
+ .iocard.open .caret{transform:rotate(90deg)}
+ .iocxchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+ .iocxchip{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:3px 10px;font-size:12px;color:var(--fg);text-decoration:none}
+ .iocxchip:hover{border-color:var(--accent)} .iocxchip b{color:var(--accent)}
+ .iocxchip.active{background:var(--accent);color:var(--ink);border-color:var(--accent)}
+ .iocxchip.active b{color:var(--ink)}
+ #iocx_filters select{padding:4px 8px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:13px}
+ #iocx_filters input[type=search]{padding:4px 8px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px;font-size:13px;width:220px}
+ .iocard.iocx-hidden{display:none}
+ tr.iocx-hidden{display:none}
+ td.iocval{font-family:var(--mono);cursor:pointer} td.iocval:hover{color:var(--accent)}
+ .ioctag{display:inline-block;border-radius:6px;padding:0 6px;font-size:10px;margin-left:6px;vertical-align:1px}
+ .ioctag-ext{background:#5a1d1d;color:#ff9b9b} .ioctag-int{background:#1d3a24;color:#8fe0a6} .ioctag-doc{background:#2b2b40;color:#b7b7d8}
+ .psprev{margin-top:5px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-word;line-height:1.5}
  #ingested h3{margin:20px 0 6px;font-size:13px}
  td.prevcell{white-space:normal;max-width:520px}
  .prev{margin:0;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:90px;overflow:auto}
@@ -1332,8 +1457,8 @@ INDEX_HTML = r"""<!doctype html>
 <style id="colstyle"></style></head>
 <body>
 <header>
- <h1><svg viewBox="0 0 24 24" width="1.2em" height="1.2em" style="vertical-align:-.26em" aria-label="chorizo"><path d="M18.7 5.8 L20.9 3.9 M18.7 5.8 L20.3 7.9" fill="none" stroke="#141414" stroke-width="1.6" stroke-linecap="round"/><path d="M6.2 18.4 C10 21.2 17.4 19.6 18.6 6.6" fill="none" stroke="#141414" stroke-width="7.8" stroke-linecap="round"/><path d="M6.2 18.4 C10 21.2 17.4 19.6 18.6 6.6" fill="none" stroke="#e0485a" stroke-width="5.6" stroke-linecap="round"/><path d="M7.4 16.8 C10 18.6 15.4 17.6 16.8 8" fill="none" stroke="#f58a95" stroke-width="1.6" stroke-linecap="round" opacity=".85"/><path d="M10.6 19.9 l1.3 -2.4" stroke="#141414" stroke-width="1.6" stroke-linecap="round"/><path d="M14.8 19.2 l1.2 -2.3" stroke="#141414" stroke-width="1.6" stroke-linecap="round"/><path d="M3.7 20.2 L6.4 18.2 L5.9 21.2 Z" fill="#e0485a" stroke="#141414" stroke-width="1.1" stroke-linejoin="round"/></svg> Longanizer</h1>
- <span class="muted">auth/syslog/access/auditd/weberror/applog/bash_history &middot; DuckDB</span>
+ <h1>&#128302; WinHound</h1>
+ <span class="muted">Windows EVTX (Sysmon/Security/PowerShell/…) &middot; DuckDB</span>
  <span id="stat" class="pill">loading&hellip;</span>
  <span id="dbpill" class="pill" title="Where this case is stored"></span>
 </header>
@@ -1344,12 +1469,10 @@ INDEX_HTML = r"""<!doctype html>
   <div class="tab hidden" data-tab="explorer" data-optional onclick="switchTab('explorer')">Explorer</div>
   <div class="tab hidden" data-tab="iocx" data-optional onclick="switchTab('iocx')">IOCs</div>
   <div class="tab hidden" data-tab="ioc" data-optional onclick="switchTab('ioc')">IOC sweep</div>
-  <div class="tab hidden" data-tab="network" data-optional onclick="switchTab('network')">Network</div>
   <div class="tab hidden" data-tab="sql" data-optional onclick="switchTab('sql')">SQL</div>
   <div class="tab parent hidden" data-tab="__ai" data-optional onclick="openGroup('ai')">AI ▾</div>
-  <div class="tab hidden" data-tab="sigma" data-optional onclick="switchTab('sigma')">Sigma</div>
-  <div class="tab hidden" data-tab="attack" data-optional onclick="switchTab('attack')">ATT&amp;CK</div>
-  <div class="tab hidden" data-tab="gtfo" data-optional onclick="switchTab('gtfo')">GTFOBins</div>
+  <div class="tab parent hidden" data-tab="__sigma" data-optional onclick="openGroup('sigma')">Sigma &amp; LOL ▾</div>
+  <div class="tab parent hidden" data-tab="__hunt" data-optional onclick="openGroup('hunt')">Hunting ▾</div>
   <div class="tab hidden" data-tab="marks" data-optional onclick="switchTab('marks')">Marks</div>
   <div class="tab hidden" data-tab="help" data-optional onclick="switchTab('help')">Help</div>
  </div>
@@ -1359,12 +1482,32 @@ INDEX_HTML = r"""<!doctype html>
   <div class="subtab" data-tab="ailocal" onclick="switchTab('ailocal')">AI (local)</div>
   <div class="subtab" data-tab="mcp" onclick="switchTab('mcp')">MCP</div>
  </div>
+ <div id="subnav_sigma" class="subnav hidden">
+  <span class="subcap">Sigma &amp; LOL</span>
+  <div class="subtab" data-tab="sigma" onclick="switchTab('sigma')">Sigma rules</div>
+  <div class="subtab" data-tab="lol_lolbas" onclick="switchTab('lol_lolbas')">LOLBAS</div>
+  <div class="subtab" data-tab="lol_loldrivers" onclick="switchTab('lol_loldrivers')">LOLDrivers</div>
+  <div class="subtab" data-tab="lol_lolrmm" onclick="switchTab('lol_lolrmm')">LOLRMM</div>
+  <div class="subtab" data-tab="lol_hijacklibs" onclick="switchTab('lol_hijacklibs')">HijackLibs</div>
+  <div class="subtab" data-tab="lol_lottunnels" onclick="switchTab('lol_lottunnels')">LOTTunnels</div>
+  <div class="subtab" data-tab="lookalike" onclick="switchTab('lookalike')">Lookalike</div>
+  <div class="subtab" data-tab="attack" onclick="switchTab('attack')">ATT&amp;CK matrix</div>
+ </div>
+ <div id="subnav_hunt" class="subnav hidden">
+  <span class="subcap">Hunting</span>
+  <div class="subtab" data-tab="proctree" onclick="switchTab('proctree')">Proc tree</div>
+  <div class="subtab" data-tab="logons" onclick="switchTab('logons')">Logons</div>
+  <div class="subtab" data-tab="persist" onclick="switchTab('persist')">Persistence</div>
+  <div class="subtab" data-tab="powershell" onclick="switchTab('powershell')">PowerShell</div>
+  <div class="subtab" data-tab="network" onclick="switchTab('network')">Network</div>
+ </div>
 
  <!-- ============ CARGAR (inicio) ============ -->
  <section id="landing" class="panel active">
   <div class="landing">
-   <p>Upload your Linux logs to start. They are parsed into a single timeline and,
-   once done, the <b>Explorer</b>, <b>SQL</b> and <b>Help</b> tabs become available.</p>
+   <p>Load your Windows <b>EVTX</b> to start. Records are normalized into a single
+   timeline (UTC) and, once done, the <b>Overview</b>, <b>Explorer</b>, <b>SQL</b>,
+   <b>Sigma</b>, the <b>LOL</b> tabs and more become available.</p>
    <div id="dbnote" class="muted" style="margin:-4px 0 10px"></div>
 
    <div class="drop">
@@ -1383,33 +1526,55 @@ INDEX_HTML = r"""<!doctype html>
    </div>
    <div class="drop">
     <div class="row">
-     <b style="font-size:13px">Load logs:</b>
-     <label class="muted">files<input type="file" id="files" multiple></label>
+     <b style="font-size:13px">Load EVTX:</b>
+     <label class="muted">files<input type="file" id="files" accept=".evtx,.zip,.gz,.tar,.tgz" multiple></label>
      <label class="muted">or folder<input type="file" id="folder" webkitdirectory multiple></label>
-     <label class="muted">time offset (min)<input type="number" id="tz" value="0" step="60" style="width:70px" title="minutes to adjust; 0 = UTC"></label>
      <button class="bigbtn" onclick="uploadFiles()">Upload and load</button>
      <button class="sec" onclick="clearPicks()">Clear selection</button>
     </div>
-    <div class="row">
-     <label class="colck" title="Ingest as 'raw' anything unrecognized that is not key=value (nothing is lost; adds some noise)"><input type="checkbox" id="catchall"> Catch-all: ingest unrecognized lines as <code>raw</code> (for keyword rules)</label>
+    <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:4px;align-items:center">
+     <span style="font-size:12px;color:var(--muted)">Time filter (UTC, optional):</span>
+     <label class="muted" style="gap:4px">From<input type="text" id="ts_from_up" placeholder="2025-01-01" style="width:130px" title="YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"></label>
+     <label class="muted" style="gap:4px">To<input type="text" id="ts_to_up" placeholder="2025-12-31" style="width:130px" title="YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"></label>
+     <select id="ts_preset_up" onchange="applyTsPreset('up',this.value)" style="font-size:12px;padding:3px 6px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px">
+      <option value="">— quick range —</option>
+      <option value="1">Last 24 h</option>
+      <option value="3">Last 3 days</option>
+      <option value="7">Last 7 days</option>
+      <option value="30">Last 30 days</option>
+      <option value="90">Last 90 days</option>
+     </select>
     </div>
     <div class="row">
      <progress id="prog" value="0" max="100" style="width:220px;display:none"></progress>
      <span id="ingmsg" class="muted"></span>
     </div>
-    <div class="muted"><b>Time offset:</b> default <b>0 (UTC)</b>. Only affects logs that do not store their timezone (syslog, auth, kern, cron, applog, web error.log); it is used to normalize them to UTC so the timeline lines up. If your logs are in local time, enter the offset in minutes: <code>+60</code> = +1 h (CET), <code>+120</code> = +2 h (CEST, Spain summer), <code>-300</code> = −5 h (EST). access and auditd are already in UTC and left untouched.</div>
-    <div class="muted" style="margin-top:6px">With <b>folder</b> you pick a directory and it uploads <b>the whole tree</b> (subfolders included); with <b>files</b>, loose files or a <code>.zip</code>/<code>.tar.gz</code> (auto-extracted). Unrecognized files are skipped.</div>
+    <div class="muted">With <b>folder</b> you pick a directory and it uploads <b>the whole tree</b> (subfolders included); with <b>files</b>, loose <code>.evtx</code> or a <code>.zip</code>/<code>.tar.gz</code> (auto-extracted, <code>.evtx</code> found recursively). Non-EVTX files are skipped. EVTX timestamps are already UTC.</div>
    </div>
 
    <div class="drop" style="margin-top:12px">
     <div class="row">
      <b style="font-size:13px">Or a path on the server:</b>
-     <input type="text" id="spath" placeholder="E:\path\to\case  (folder, file or .zip/.tar.gz)" style="flex:1;min-width:280px">
-     <label class="muted">time offset (min)<input type="number" id="tzp" value="0" step="60" style="width:70px" title="minutes to adjust; 0 = UTC"></label>
+     <input type="text" id="spath" placeholder="E:\path\to\triage  (folder, .evtx or .zip/.tar.gz)" style="flex:1;min-width:280px">
      <button class="bigbtn" onclick="ingestPath()">Load from path</button>
     </div>
-    <div class="muted">Faster when the logs are already <b>on this machine</b>: the server reads them straight from disk, without uploading through the browser, and you get <b>live progress</b> (files and events). Supports the same (folders with subfolders and archives). The path is on the machine running the server.</div>
+    <div class="row" style="flex-wrap:wrap;gap:10px;margin-top:4px;align-items:center">
+     <span style="font-size:12px;color:var(--muted)">Time filter (UTC, optional):</span>
+     <label class="muted" style="gap:4px">From<input type="text" id="ts_from_path" placeholder="2025-01-01" style="width:130px" title="YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"></label>
+     <label class="muted" style="gap:4px">To<input type="text" id="ts_to_path" placeholder="2025-12-31" style="width:130px" title="YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"></label>
+     <select id="ts_preset_path" onchange="applyTsPreset('path',this.value)" style="font-size:12px;padding:3px 6px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:6px">
+      <option value="">— quick range —</option>
+      <option value="1">Last 24 h</option>
+      <option value="3">Last 3 days</option>
+      <option value="7">Last 7 days</option>
+      <option value="30">Last 30 days</option>
+      <option value="90">Last 90 days</option>
+     </select>
+    </div>
+    <div class="muted">Faster when the EVTX are already <b>on this machine</b>: the server reads them straight from disk, without uploading through the browser, and you get <b>live progress</b> (files and events). Supports folders with subfolders and archives. The path is on the machine running the server.</div>
    </div>
+
+   <div class="muted" style="margin-top:12px">💡 <b>Sample data:</b> 562 attack EVTX ship with WinHound in <code>samples/evtx-attack-samples.zip</code>. Unzip it and load the <code>evtx-attack-samples/</code> folder, or point either loader straight at the <code>.zip</code>.</div>
 
    <div id="ingested"></div>
    <div class="row"><button id="goexp" class="bigbtn hidden" onclick="switchTab('explorer')">Go to Explorer &rarr;</button></div>
@@ -1436,12 +1601,16 @@ INDEX_HTML = r"""<!doctype html>
     <div class="tbrow">
      <div class="fld grow qacwrap">
       <label for="q">Text, IOC, IP or hash <span class="hintlbl">· words = AND · <code>field:value</code> · <code>-exclude</code></span></label>
-      <input type="text" id="q" placeholder="root  src_ip:192  -user:cron" autofocus autocomplete="off">
+      <input type="text" id="q" placeholder="mimikatz  image:powershell  -user:SYSTEM" autofocus autocomplete="off">
       <div id="qac" class="qac hidden"></div>
      </div>
      <div class="fld">
-      <label for="src">Source</label>
+      <label for="src">Channel</label>
       <select id="src"><option>(all)</option></select>
+     </div>
+     <div class="fld">
+      <label for="eid">EventID</label>
+      <select id="eid"><option>(all)</option></select>
      </div>
      <div class="fld fld-chk">
       <label>Mode</label>
@@ -1453,19 +1622,19 @@ INDEX_HTML = r"""<!doctype html>
      <summary>How to filter &mdash; field search, exact match &amp; exclude (NOT)</summary>
      <div class="qhelpbody">
       <table>
-       <tr><td><code>root ssh</code></td><td>free text; several words = <b>AND</b> (all must appear)</td></tr>
-       <tr><td><code>src_ip:192</code></td><td>field <b>contains</b> (case-insensitive). Also <code>user:root</code>, <code>exe:wget</code>, <code>message:passwd</code></td></tr>
-       <tr><td><code>src_ip&nbsp;contains&nbsp;192</code></td><td>same thing, written with the word <code>contains</code></td></tr>
-       <tr><td><code>status=404</code></td><td>field <b>exactly</b> equals (<code>=</code>). <code>user=root</code> matches only «root», not «root2»</td></tr>
-       <tr><td><code>user!=root</code></td><td>field is <b>not</b> that value</td></tr>
-       <tr><td><code>-cron</code> &nbsp; <code>-user:root</code></td><td><b>exclude</b> (NOT): drop events with that text / field value. Several allowed</td></tr>
-       <tr><td><code>x:syscall:execve</code></td><td>a key of the <code>extra</code> JSON (auditd/logfmt). Also <code>extra.syscall:execve</code></td></tr>
-       <tr><td><code>/regex/</code></td><td>regex over the raw line, e.g. <code>/failed|invalid/</code>. Combine with fields &amp; NOT</td></tr>
-       <tr><td><code>exe:/wget|curl/</code></td><td>regex on a single field. Quote if it has spaces: <code>"message:/a b/"</code></td></tr>
-       <tr><td><code>user:*</code></td><td>the field <b>exists</b> / has a value. <code>-user:*</code> (or <code>user:-</code>) = <b>empty or missing</b></td></tr>
-       <tr><td><code>user:"john doe"</code></td><td>use quotes for values with spaces</td></tr>
+       <tr><td><code>mimikatz lsass</code></td><td>free text; several words = <b>AND</b> (all must appear)</td></tr>
+       <tr><td><code>image:powershell</code></td><td>field <b>contains</b> (case-insensitive). Also <code>command_line:enc</code>, <code>user:admin</code>, <code>src_ip:10.</code></td></tr>
+       <tr><td><code>image&nbsp;contains&nbsp;powershell</code></td><td>same thing, written with the word <code>contains</code></td></tr>
+       <tr><td><code>eid=4688</code></td><td>field <b>exactly</b> equals (<code>=</code>). Handy for EventID, logon_type…</td></tr>
+       <tr><td><code>user!=SYSTEM</code></td><td>field is <b>not</b> that value</td></tr>
+       <tr><td><code>-SYSTEM</code> &nbsp; <code>-eid:4624</code></td><td><b>exclude</b> (NOT): drop events with that text / field value. Several allowed</td></tr>
+       <tr><td><code>x:TargetObject:Run</code></td><td>a key of the <code>extra</code> JSON (EventData, <b>PascalCase</b>). Also <code>extra.TargetObject:Run</code></td></tr>
+       <tr><td><code>/regex/</code></td><td>regex over the raw record, e.g. <code>/mimikatz|sekurlsa/</code>. Combine with fields &amp; NOT</td></tr>
+       <tr><td><code>command_line:/-enc\s+\w+/</code></td><td>regex on a single field. Quote if it has spaces: <code>"command_line:/a b/"</code></td></tr>
+       <tr><td><code>logon_type:*</code></td><td>the field <b>exists</b> / has a value. <code>-logon_type:*</code> (or <code>logon_type:-</code>) = <b>empty or missing</b></td></tr>
+       <tr><td><code>command_line:"-enc AB"</code></td><td>use quotes for values with spaces</td></tr>
       </table>
-      <p class="hintlbl">Mix freely: <code>ssh_failed src_ip:192 -user:root /enc\s+\w+/</code>. Fields: ts, source, host, program, user, src_ip, src_port, exe, method, path, status, event, message (aliases: ip, prog, msg…). The <b>regex</b> checkbox treats the WHOLE box as one regex; the <code>/…/</code> form above works token-by-token without it.</p>
+      <p class="hintlbl">Mix freely: <code>image:powershell -user:SYSTEM eid=1</code>. Fields: ts, source(channel), host, eid, user, sid, src_ip, dst_ip, image, command_line, parent_image, hashes, target_filename, logon_type, message (aliases: ip, id, cmd, img, parent…). The <b>regex</b> checkbox treats the WHOLE box as one regex; the <code>/…/</code> form works token-by-token without it.</p>
      </div>
     </details>
     <details class="qhelp savedbox" ontoggle="if(this.open)renderSaved()">
@@ -1484,18 +1653,18 @@ INDEX_HTML = r"""<!doctype html>
       <label for="facfield">Field</label>
       <select id="facfield">
        <optgroup label="categorical">
-        <option value="source">source</option><option value="user">user</option>
-        <option value="src_ip">src_ip</option><option value="program">program</option>
-        <option value="status">status</option><option value="event">event</option>
-        <option value="severity">severity</option><option value="host">host</option>
-        <option value="method">method</option><option value="asn">asn</option>
-        <option value="org">org</option>
+        <option value="eid">eid</option><option value="source">channel</option>
+        <option value="user">user</option><option value="src_ip">src_ip</option>
+        <option value="dst_ip">dst_ip</option><option value="image">image</option>
+        <option value="parent_image">parent_image</option><option value="logon_type">logon_type</option>
+        <option value="level">level</option><option value="host">host</option>
+        <option value="asn">asn</option><option value="org">org</option>
        </optgroup>
        <optgroup label="high cardinality">
-        <option value="message">message</option><option value="exe">exe</option>
-        <option value="path">path</option>
+        <option value="command_line">command_line</option><option value="target_filename">target_filename</option>
+        <option value="hashes">hashes</option><option value="message">message</option>
        </optgroup>
-       <optgroup label="extra (JSON)" id="facextra"></optgroup>
+       <optgroup label="extra (EventData)" id="facextra"></optgroup>
       </select>
      </div>
      <button class="sec" onclick="loadFacets()">Top values</button>
@@ -1633,15 +1802,15 @@ LIMIT 50;</textarea>
  <!-- ============ SIGMA ============ -->
  <section id="sigma" class="panel">
   <div class="help">
-   <p>Run <b>Sigma</b> rules over the loaded logs (historical detection / retro-hunting).
-   Only <b>Linux</b> and <b>webserver</b> rules whose logsource is present in the
-   case are applied; the rest are skipped. Each rule is translated to SQL and runs over the <code>events</code> table.</p>
+   <p>Run your <b>Sigma</b> rules (Windows taxonomy) over the loaded EVTX. The
+   logsource maps to channels/EventIDs (e.g. <code>process_creation</code> →
+   Sysmon EID1 or Security 4688); rules that filter by <code>Channel</code>/
+   <code>EventID</code> directly also work. Each rule is translated to SQL over the
+   <code>events</code> table. This tab is for your <b>general</b> ruleset (no chart).</p>
   </div>
   <div class="aicfg">
-   <label class="wide">rules folder on the server<input type="text" id="sg_path" placeholder="reglas_sigma  (or an absolute path)"></label>
+   <label class="wide">rules folder on the server<input type="text" id="sg_path" placeholder="path to your general Sigma rules folder"></label>
    <button class="bigbtn" onclick="sigmaLoad()">Load rules</button>
-   <label class="muted">or upload .yml<input type="file" id="sg_files" accept=".yml,.yaml" multiple></label>
-   <button class="sec" onclick="sigmaUpload()">Upload and load</button>
   </div>
   <div class="row">
    <button onclick="sigmaRun()" id="sg_runbtn" disabled>Run rules</button>
@@ -1653,29 +1822,120 @@ LIMIT 50;</textarea>
   <div id="sg_out"></div>
  </section>
 
- <!-- ============ GTFOBins ============ -->
- <section id="gtfo" class="panel">
+ <!-- ============ LOL TABS (one per category) ============ -->
+ <section id="lol_lolbas" class="panel"></section>
+ <section id="lol_loldrivers" class="panel"></section>
+ <section id="lol_lolrmm" class="panel"></section>
+ <section id="lol_hijacklibs" class="panel"></section>
+ <section id="lol_lottunnels" class="panel"></section>
+
+ <!-- ============ LOOKALIKE (Levenshtein) ============ -->
+ <section id="lookalike" class="panel">
   <div class="help">
-   <p><b>GTFOBins</b> catalogs legitimate Unix binaries and the invocations used
-   to abuse them (get a shell, escalate via <code>suid</code>/<code>sudo</code>,
-   read/write files, reverse-shell…). Here that catalog is cross-referenced with the
-   binaries that were <b>actually executed</b> in the loaded logs:
-   auditd <code>execve</code>, <code>bash_history</code> commands and what was run
-   via <code>sudo</code>.</p>
+   <p>Find executed binaries whose name is <b>suspiciously close</b> to a legitimate
+   Windows/LOLBAS binary (e.g. <code>cmd2.exe</code>, <code>svch0st.exe</code>,
+   <code>scvhost.exe</code>) by <b>Levenshtein distance</b>. Exact matches (the real
+   ones) are excluded. Optionally also compare the seen binaries against each other.</p>
   </div>
+  <div class="toolbar">
+   <div class="tbgroup"><div class="tbglabel">Lookalike search</div>
+    <div class="tbrow">
+     <div class="fld"><label for="lk_dist">Max distance</label>
+      <select id="lk_dist"><option>1</option><option selected>2</option><option>3</option></select></div>
+     <div class="fld fld-chk"><label>Mode</label>
+      <label class="chk"><input type="checkbox" id="lk_seen"> also compare seen vs seen</label></div>
+     <button class="bigbtn" onclick="lkRun()">Search lookalikes</button>
+     <span id="lk_msg" class="muted"></span>
+    </div>
+   </div>
+  </div>
+  <div id="lk_out"></div>
+ </section>
+
+ <!-- ============ PHASE 2: advanced Windows views ============ -->
+ <section id="proctree" class="panel">
+  <div class="help"><p>Process tree for Sigma <b>process_creation</b> — Sysmon <b>EID1</b>
+  <i>and</i> Security <b>4688</b>. Linked by <code>ProcessGuid</code>/<code>ParentProcessGuid</code>
+  when present (Sysmon), otherwise by <b>PID</b> within the same host and time order (4688).
+  <b>Anchored on a process you choose</b>: enter a <b>PID</b>, a <b>ProcessGuid</b> or an
+  <b>image name</b> and the tree is built from there (descendants plus the chain of ancestors),
+  instead of loading every process. Each node shows its source (<span class="ptsrc">sysmon</span>/<span class="ptsrc">4688</span>);
+  click a node to jump to its event context.</p></div>
   <div class="row">
-   <button class="bigbtn" onclick="gtfoCheck()" id="gtfo_checkbtn">Check executed binaries</button>
-   <button class="sec" onclick="gtfoRefresh()" id="gtfo_refreshbtn">Update catalog (GitHub)</button>
-   <button class="sec" onclick="gtfoToggleList()" id="gtfo_listbtn">View full catalog</button>
-   <span id="gtfo_msg" class="muted"></span>
-  </div>
-  <div id="gtfo_out"></div>
-  <div id="gtfo_list" class="hidden"></div>
+   <input id="pt_pid" placeholder="PID — e.g. 3388" style="width:140px"
+     onkeydown="if(event.key==='Enter')loadProctree()">
+   <input id="pt_img" placeholder="image — e.g. mimikatz.exe" style="width:200px"
+     onkeydown="if(event.key==='Enter')loadProctree()">
+   <input id="pt_guid" placeholder="ProcessGuid (optional, most precise)" style="width:290px"
+     onkeydown="if(event.key==='Enter')loadProctree()">
+   <button class="bigbtn" onclick="loadProctree()">Build tree</button>
+   <button class="sec" onclick="ptAll(1)">Expand all</button>
+   <button class="sec" onclick="ptAll(0)">Collapse all</button>
+   <span id="pt_msg" class="muted"></span></div>
+  <div id="pt_anchors"></div>
+  <div id="pt_out"></div>
+ </section>
+
+ <section id="logons" class="panel">
+  <div class="help"><p>Authentication activity (Sigma-style, across channels):
+  <b>Security</b> logons (4624/4625/4634/4647/4648/4672), <b>Kerberos</b> (4768/4769/4771),
+  <b>NTLM</b> (4776) and <b>RDP</b> (4778/4779, TerminalServices 1149 &amp; 21/22/24/25) — with
+  logon type, source IP, workstation and auth package normalized per source. Failed
+  auth (4625/4771) is highlighted. Filter by user, type, source IP, workstation, auth
+  or host (substring; type is exact).</p></div>
+  <div class="row">
+   <input id="lo_user" placeholder="user" style="width:130px"
+     onkeydown="if(event.key==='Enter')loadLogons()">
+   <input id="lo_type" placeholder="type (2,3,10…)" style="width:120px"
+     onkeydown="if(event.key==='Enter')loadLogons()">
+   <input id="lo_src" placeholder="source IP" style="width:130px"
+     onkeydown="if(event.key==='Enter')loadLogons()">
+   <input id="lo_ws" placeholder="workstation" style="width:140px"
+     onkeydown="if(event.key==='Enter')loadLogons()">
+   <input id="lo_auth" placeholder="auth (NTLM/Kerberos…)" style="width:170px"
+     onkeydown="if(event.key==='Enter')loadLogons()">
+   <input id="lo_host" placeholder="host" style="width:150px"
+     onkeydown="if(event.key==='Enter')loadLogons()">
+   <button class="bigbtn" onclick="loadLogons()">Search</button>
+   <button class="sec" onclick="clearLogons()">Clear</button>
+   <span id="lo_msg" class="muted"></span></div>
+  <div id="lo_out"></div>
+ </section>
+
+ <section id="persist" class="panel">
+  <div class="help"><p>Persistence signals (ASEP) from <b>Sysmon</b> and <b>native Windows
+  logs</b>: registry autostart in ~30 locations (Sysmon 12/13/14 — Run keys, Winlogon,
+  IFEO, AppInit/AppCert, services, COM/CLSID, LSA, screensaver, Active Setup…), the
+  <b>Startup folder</b> (Sysmon 11), <b>service</b> installs &amp; start-type changes
+  (7045/4697/7040), <b>scheduled tasks</b> (4698–4702, TaskScheduler 106/140/141/200/201),
+  <b>WMI</b> subscriptions (Sysmon 19/20/21 and WMI-Activity 5861), <b>account</b> creation
+  and privileged <b>group</b> additions (4720/4722/4728/4732/4738/4756) and <b>BITS</b> jobs
+  (Bits-Client 3).</p></div>
+  <div class="row"><button class="bigbtn" onclick="loadPersist()">Refresh</button>
+   <input id="pe_filter" placeholder="filter type / detail…" style="width:220px"
+     oninput="renderPersist()">
+   <span id="pe_msg" class="muted"></span></div>
+  <div id="pe_out"></div>
+ </section>
+
+ <section id="powershell" class="panel">
+  <div class="help"><p>PowerShell <b>script blocks</b> (Operational <b>4104</b>),
+  reassembled when logged in multiple parts. Type a string to find only the scripts
+  that contain it (searches the whole reassembled script, so you don't have to read
+  them all). Click a row to expand the script; click the script to jump to its event
+  context. Needs PowerShell script-block logging enabled in the source host.</p></div>
+  <div class="row">
+   <input id="ps_q" placeholder="find text in script — e.g. DownloadString, -enc, Invoke-" style="width:360px"
+     onkeydown="if(event.key==='Enter')loadPS()">
+   <button class="bigbtn" onclick="loadPS()">Search</button>
+   <button class="sec" onclick="document.getElementById('ps_q').value='';loadPS()">Clear</button>
+   <span id="ps_msg" class="muted"></span></div>
+  <div id="ps_out"></div>
  </section>
 
  <!-- ============ IOC EXTRACTOR ============ -->
  <section id="iocx" class="panel">
-  <div class="help"><p>Automatically <b>extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, user agents, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, with how many events each one appears in. Public IPs are tagged with their class and <b>ASN · Org</b>. Click any value to jump to its first event; export the lot as CSV or JSON. <i>(This is the reverse of <b>IOC sweep</b>, where you paste your own IOCs.)</i></p></div>
+  <div class="help"><p>Automatically <b>extracts the IOCs present in the loaded EVTX</b> — IPv4/IPv6, domains, URLs, emails, user agents, hashes (MD5/SHA1/SHA256/imphash), file paths, registry keys, named pipes, services and scheduled tasks — grouped by type, with how many events each one appears in. Public IPs are tagged with their class and <b>ASN · Org</b>. Click any value to jump to its first event; export the lot as CSV or JSON. <i>(This is the reverse of <b>IOC sweep</b>, where you paste your own IOCs.)</i></p></div>
   <div class="row">
    <button class="bigbtn" onclick="loadIocx()" id="iocx_btn">Extract IOCs</button>
    <button class="sec" onclick="iocxExport('csv')" id="iocx_csv" disabled>Download CSV</button>
@@ -1695,9 +1955,9 @@ LIMIT 50;</textarea>
 
  <!-- ============ IOC SWEEP ============ -->
  <section id="ioc" class="panel">
-  <div class="help"><p>Paste a list of <b>IOCs</b> — IPs, hashes, file paths, binaries, user names, domains — one per line (or comma/semicolon separated) and sweep all loaded logs at once. Each IOC shows its hit count and a sample; the match looks across the relevant fields <i>and</i> the raw log line. Click a row for its context, or &#10697; to copy the full event.</p></div>
+  <div class="help"><p>Paste a list of <b>IOCs</b> — IPs, hashes, file names, domains, user names — one per line (or comma/semicolon separated) and sweep the whole dataset at once. Each IOC shows its hit count and a sample; the match looks across the relevant fields <i>and</i> the raw event, so the indicator is found wherever it appears. Click a row for its context, or &#10697; to copy the full event.</p></div>
   <div class="row" style="align-items:flex-start">
-   <textarea id="ioc_in" placeholder="8.8.8.8&#10;/tmp/.x/payload&#10;wget&#10;evil-domain.com&#10;root" style="min-height:130px;width:380px"></textarea>
+   <textarea id="ioc_in" placeholder="8.8.8.8&#10;mimikatz.exe&#10;e3b0c44298fc1c14...&#10;evil-domain.com&#10;IEUser" style="min-height:130px;width:380px"></textarea>
    <div>
     <button class="bigbtn" onclick="runIoc()">Sweep</button>
     <button class="sec" onclick="clearIoc()">Clear</button>
@@ -1710,12 +1970,13 @@ LIMIT 50;</textarea>
 
  <!-- ============ NETWORK ============ -->
  <section id="network" class="panel">
-  <div class="help"><p>Network connectivity from the logs — SSH auth (source IP), web access/error (<code>access</code>/<code>weberror</code>), auditd connections (<code>SADDR=</code>) and firewall drops (<code>SRC=</code>). Filter by IP, port, source or event.</p></div>
+  <div class="help"><p>Network connectivity — Sysmon <b>EID3</b> (connections) and <b>22</b> (DNS) plus <b>native Windows</b> events: Filtering Platform <b>5156/5157</b> (allow/block) and <b>5158</b> (bind). Protocol and direction are normalized per source. Filter by IP/host, port, protocol, process or kind.</p></div>
   <div class="row">
-   <input id="nw_ip" placeholder="IP" style="width:150px" onkeydown="if(event.key==='Enter')loadNetwork()">
+   <input id="nw_ip" placeholder="IP / host / query" style="width:170px" onkeydown="if(event.key==='Enter')loadNetwork()">
    <input id="nw_port" placeholder="port" style="width:90px" onkeydown="if(event.key==='Enter')loadNetwork()">
-   <input id="nw_source" placeholder="source (auth/access…)" style="width:170px" onkeydown="if(event.key==='Enter')loadNetwork()">
-   <input id="nw_event" placeholder="event (ssh_failed…)" style="width:170px" onkeydown="if(event.key==='Enter')loadNetwork()">
+   <input id="nw_proto" placeholder="proto (TCP/UDP)" style="width:140px" onkeydown="if(event.key==='Enter')loadNetwork()">
+   <input id="nw_img" placeholder="process" style="width:160px" onkeydown="if(event.key==='Enter')loadNetwork()">
+   <select id="nw_kind"><option value="">any kind</option><option value="conn">conn</option><option value="dns">dns</option><option value="bind">bind</option><option value="blocked">blocked</option></select>
    <button class="bigbtn" onclick="loadNetwork()">Search</button>
    <button class="sec" onclick="clearNet()">Clear</button>
    <span id="nw_msg" class="muted"></span>
@@ -1725,7 +1986,7 @@ LIMIT 50;</textarea>
 
  <!-- ============ ATT&CK MATRIX ============ -->
  <section id="attack" class="panel">
-  <div class="help"><p><b>ATT&amp;CK coverage</b> of this case, built from your matched <b>Sigma</b> rules. Techniques grouped by tactic, colored by rule level, number = matching events; click a technique to jump to a sample event. Load and run your Sigma rules first (they need <code>attack.*</code> tags).</p></div>
+  <div class="help"><p><b>ATT&amp;CK coverage</b> of this case, built from your matched <b>Sigma</b> rules across every loaded tab (Sigma + the LOL sets). Techniques are grouped by tactic; the number is the count of matching events, and the color is the worst rule level. Load your rules first, then build. Click a technique to jump to a sample event.</p></div>
   <div class="row"><button class="bigbtn" onclick="loadAttack()" id="at_btn">Build / refresh matrix</button>
    <progress id="at_prog" max="100" value="0" style="display:none;width:180px;vertical-align:middle"></progress>
    <span id="at_msg" class="muted"></span></div>
@@ -1768,160 +2029,76 @@ LIMIT 50;</textarea>
  <!-- ============ AYUDA ============ -->
  <section id="help" class="panel">
   <div class="help">
-   <p>Loaded logs are normalized into a single <code>events</code> table and stored
-   in <b>UTC</b>, so you can correlate different sources on one timeline.</p>
+   <p>EVTX records are normalized into one <code>events</code> table in <b>UTC</b>
+   (System fields to columns, EventData promoted or kept in <code>extra</code>, full
+   record in <code>raw</code>). For a full walkthrough see the separate user guide.</p>
 
-   <h3>Explorer — search</h3>
+   <h3>Load</h3>
    <ul>
-    <li>Type any text: an IOC, an IP, a hash, a path, a piece of a command. Searches the message, the raw line, <code>exe</code>, path, user and IP. Case-insensitive.</li>
-    <li><b>Multiple words = AND</b> (all must appear in the same event). E.g. <code>suid bash</code>.</li>
-    <li><b>Filter by a field's content</b> with <code>field:value</code> (contains), e.g. <code>src_ip:192</code>, <code>user:root</code>, <code>exe:wget</code>. The word form <code>src_ip contains 192</code> works too. <code>field=value</code> is an <b>exact</b> match (<code>status=404</code>), <code>field!=value</code> is <b>not equal</b>.</li>
-    <li><b>Exclude (NOT)</b> with a leading <code>-</code>: <code>-cron</code> drops events with that text, <code>-user:root</code> drops that field value. Several includes and excludes can be mixed: <code>ssh_failed src_ip:192 -user:root</code>.</li>
-    <li>Reach an <code>extra</code> JSON key (auditd/logfmt/csv) with <code>x:key:value</code> or <code>extra.key:value</code>, e.g. <code>x:syscall:execve</code>. Quote values with spaces: <code>user:"john doe"</code>. There's a <b>«How to filter»</b> cheatsheet right under the search box, and the box <b>autocompletes field names</b> (including discovered <code>extra</code> keys).</li>
-    <li><b>Regex per token</b> without the checkbox: <code>/regex/</code> matches the raw line and <code>field:/regex/</code> a single field (e.g. <code>exe:/wget|curl/</code>), both combinable with fields and <code>-</code>NOT. The <b>regex</b> checkbox instead treats the whole box as one regex (the <code>^</code>/<code>$</code> anchors apply to the raw line).</li>
-    <li><b>Field exists / empty</b>: <code>field:*</code> keeps events where that field <b>has a value</b> (e.g. <code>src_ip:*</code>), and <code>-field:*</code> (or <code>field:-</code>) keeps those where it is <b>empty or missing</b>.</li>
-    <li><b>Facets</b>: pick a field and click <b>Top values</b> to see its most frequent values over the current results (bars + counts); click one to add it to the search. Categorical fields (user, src_ip, status, asn, org…) are the useful ones. The list is scrollable and has a <b>✕ hide</b>; it follows the <b>current view</b> — the <b>timeline</b> facets over everything (its source/time filters), a <b>search</b> over its matches.</li>
-    <li><b>Recent &amp; saved searches</b>: the box keeps your last searches and lets you save named ones (stored in this browser).</li>
-    <li>The <b>(all)</b> dropdown filters by source (auth, access, auditd…).</li>
+    <li>Upload <code>.evtx</code>, a whole folder, or a <code>.zip</code>/<code>.tar.gz</code> (EVTX found recursively), or give a server path (live progress). EVTX timestamps are already UTC.</li>
+    <li>Everything persists in a <code>.duckdb</code> case under <code>casos/</code>; reopen it later without re-ingesting.</li>
+    <li>When reading from a <b>server path</b>, the progress bar advances <b>by bytes</b> (reading X / Y MB · %), so it moves <i>within</i> a single large <code>.evtx</code>, not just file by file. Records are inserted in batches as the file is read.</li>
    </ul>
 
-   <h3>Explorer — context</h3>
+   <h3>Explorer, Time range &amp; SQL</h3>
    <ul>
-    <li>Each result carries a <b>#</b> = its position in the timeline (<b>#1 = oldest</b>).</li>
-    <li>Click a result to expand its context; change <b>window ±</b> and the unit:
-     <b>lines</b> (N events above/below) or <b>minutes</b> (time window around it). Decimals allowed (0.5 min = 30 s).</li>
-    <li><b>Go to #</b>: type an event number and it opens its context directly (handy to return to a specific hit).</li>
-    <li>Results come in a <b>table with every parsed column</b> (including the source file); if they don't fit, the table scrolls horizontally. Click a row to see its context above. The <b>&#10697;</b> button on every row — and in the context header — copies the <b>full event</b> (raw line / JSON) to the clipboard.</li>
-    <li>Only <b>visible columns</b> are rendered and long cells are truncated (full value on hover), so the table stays fast with many events. <b>&#8615; CSV</b> exports the loaded rows.</li>
-    <li>Two extra columns — <b>ASN</b> (e.g. <code>AS3352</code>) and <b>Org/ISP</b> — are filled from the first IP in each row via GeoIP. They need the <b>ASN database</b> downloaded (Overview → <b>Update GeoIP database</b>) and only apply to public IPs; private/internal rows stay empty. Hide or reorder them in the <b>Columns</b> panel like any other.</li>
-    <li>The <b>events per page</b> field sets how many load at once and how many each «Load more» brings (default 500).</li>
-    <li>The <b>Time range</b> (From / To, UTC) applies to <i>both</i> search and the full timeline.</li>
-    <li><b>Sorting</b>: click a column <b>header</b> (asc/desc; the ▲/▼ arrow shows the order). The server sorts the whole set, not just the page.</li>
-    <li>The <b>Columns</b> button opens a panel of <b>chips</b>: each column shows as on (visible) or off (hidden) and toggles with a click. Shortcuts <b>Show/Hide all</b> and <b>Hide empty</b>, <b>reorder</b> with ◀ ▶ and back to <b>Original order</b>. Applies instantly and remembers your choice.</li>
-    <li><b><code>extra</code> columns</b>: the keys of the <code>extra</code> JSON (auditd, or those auto-generated from a <code>logfmt</code>) appear in the panel tagged «extra»; they start hidden — enable them to see them as a column and sort by them.</li>
-    <li><b>Show full timeline</b>: lists everything in chronological order (paged). You can bound it with the <b>from … to …</b> fields (UTC, format <code>2026-09-29</code> or <code>2026-09-29 08:00</code>) to avoid loading everything.</li>
+    <li>Search any text (IOC, IP, hash, command, Image). Multiple words = AND. Toggle <b>regex</b>. The <b>Channel</b> dropdown filters by source, and next to it the <b>EventID</b> dropdown filters by event ID (both default to <b>(all)</b>, are populated from what's loaded, and apply to <i>both</i> the search and the timeline).</li>
+    <li><b>Filter by a field's content</b> with <code>field:value</code> (contains), e.g. <code>image:powershell</code>, <code>command_line:enc</code>, <code>src_ip:10.</code> (word form <code>image contains powershell</code> works too). <code>field=value</code> is an <b>exact</b> match (<code>eid=4688</code>), <code>field!=value</code> is <b>not equal</b>. <b>Exclude (NOT)</b> with a leading <code>-</code>: <code>-SYSTEM</code>, <code>-eid:4624</code>. Reach an EventData key with <code>x:TargetObject:Run</code> (PascalCase). <b>Regex per token</b>: <code>/regex/</code> over the raw record and <code>field:/regex/</code> on one field (e.g. <code>command_line:/-enc\s+\w+/</code>), combinable with fields and NOT. <b>Field exists / empty</b>: <code>field:*</code> = that field has a value (e.g. <code>logon_type:*</code>), <code>-field:*</code> (or <code>field:-</code>) = empty or missing. Mix freely: <code>image:powershell -user:SYSTEM eid=1</code>. A <b>«How to filter»</b> cheatsheet sits under the search box, which also <b>autocompletes field names</b>; the <b>regex</b> checkbox treats the whole box as one regex.</li>
+    <li><b>Facets</b>: pick a field and click <b>Top values</b> for its most frequent values over the current results — click one to add it to the search (categorical fields like eid, user, image, src_ip, asn, org are the useful ones). The list is scrollable and has a <b>✕ hide</b>; it follows the <b>current view</b> — the <b>timeline</b> facets over everything (its channel/time filters), a <b>search</b> over its matches. <b>Recent &amp; saved searches</b> keeps your last queries and named ones (in this browser).</li>
+    <li><b>Time range</b> (From / To, UTC) applies to <i>both</i> search and the full timeline, to scope a window.</li>
+    <li>Click a row for its <b>context</b> (±N events). The <b>&#10697;</b> button on every row — and in the context header — copies the <b>full event JSON</b> to the clipboard; the <b>Structured event</b> modal shows the whole record to read and copy in full.</li>
+    <li>The <b>Columns</b> panel shows first-class columns plus every <code>extra</code> (EventData) key — use its <b>filter</b> box. <b>EventID</b> and <b>Channel</b> are shown by default (key triage fields, EventID placed next to Channel). Two GeoIP columns — <b>ASN</b> (e.g. <code>AS3352</code>) and <b>Org/ISP</b> — are filled from the row's IP (SourceIp, else DestinationIp); they need the <b>ASN database</b> downloaded (Overview → <b>Update GeoIP database</b>) and only fill for public IPs. Only visible columns are rendered (fast with many events), and long cells are truncated (full value on hover). <b>&#8615; CSV</b> exports the loaded rows.</li>
+    <li>SQL runs over <code>events</code>; reach EventData with <code>extra-&gt;&gt;'FieldName'</code>.</li>
    </ul>
 
    <h3>IOCs <span class="hintlbl">· extractor (discovered indicators)</span></h3>
    <ul>
-    <li><b>Extracts the IOCs present in the loaded logs</b> — IPv4/IPv6, domains, URLs, emails, user agents, hashes (MD5/SHA1/SHA256) and file paths — grouped by type, each with the number of events it appears in. Strict validation avoids false positives (e.g. an auditd <code>saddr=</code> hex blob is not reported as an MD5, and <code>payload.sh</code> is not a domain). Public IPs are tagged with their class and <b>ASN · Org</b>. Click a value to jump to its first event; export everything as CSV or JSON. It's the <b>reverse of IOC sweep</b>: you don't paste anything, the app discovers them.</li>
+    <li><b>Extracts the IOCs present in the loaded EVTX</b> — IPv4/IPv6, domains, URLs, emails, user agents, hashes (MD5/SHA1/SHA256/imphash), file paths, registry keys, named pipes, services and scheduled tasks — grouped by type, each with the number of events it appears in. Registry/pipe/service/task come from the parsed EventData fields; strict validation keeps the rest clean. Public IPs are tagged with their class and <b>ASN · Org</b>. Click a value to jump to its first event; export everything as CSV or JSON. It's the <b>reverse of IOC sweep</b>: the app discovers them for you.</li>
    </ul>
 
    <h3>IOC sweep</h3>
    <ul>
-    <li>Paste a list of IOCs (one per line) — IPs, hashes, file paths, binaries, users, domains — and sweep all loaded logs at once. Each IOC shows its hit count and a sample; the match covers the relevant fields <i>and</i> the raw line. IP IOCs are tagged <b>internal</b> or with their <b>ASN · Org/ISP</b>. Export the summary as CSV.</li>
+    <li>Paste a list of IOCs (one per line) — IPs, hashes, file names, domains, users — and sweep the whole dataset at once. Each IOC shows its hit count and a sample; the match covers the relevant fields <i>and</i> the raw event. IP IOCs are tagged <b>internal</b> or with their <b>ASN · Org/ISP</b>. Export the summary as CSV.</li>
    </ul>
 
-   <h3>AI and MCP <span class="hintlbl">· grouped under “AI ▾”</span></h3>
+   <h3>Sigma &amp; LOL (grouped under “Sigma &amp; LOL ▾”)</h3>
    <ul>
-    <li><b>AI (API)</b>: ask in natural language; the model uses the read-only tools (search/SQL/context/stats/timeline). Connect to an OpenAI-compatible endpoint (your company's LiteLLM, a provider…). The key is stored only in your browser.</li>
-    <li><b>AI (local)</b>: the same, pointing to a local app (Ollama, LM Studio…), so the data never leaves your machine.</li>
-    <li><b>MCP</b>: exposes the logs as read-only MCP tools for Claude Desktop/Code. The MCP tab has the config ready to copy (it shares the case's DuckDB file).</li>
+    <li><b>Sigma</b> runs your <i>general</i> ruleset. Windows taxonomy: <code>process_creation</code> → Sysmon EID1 + Security 4688; rules that filter by <code>Channel</code>/<code>EventID</code> work too. Rule <b>loading shows a progress bar</b> (file by file), and running shows per-rule progress.</li>
+    <li><b>Expand a detection</b> to see the <b>full rule (YAML)</b> that fired and the <b>structured raw log</b> of the matching event. Every finding carries the triage buttons (<b>⎘ copy</b>, <b>view structured</b>, <b>mark</b>) and an <b>add to review</b> action — the same across the LOL tabs. On the <b>ATT&amp;CK</b> matrix each technique tile has a <b>&#43;</b> to send a sample of that technique to review. <b>Lookalike</b> aggregates by binary, so its mark button sends a <b>sample event</b> of that binary to review (clicking the row still pivots to the Explorer).</li>
+    <li>Each <b>LOL</b> tab (LOLBAS/LOLDrivers/LOLRMM/HijackLibs/LOTTunnels) loads <b>its own rules folder</b> and shows findings + a chart of the top indicator by events that hit. <i>You provide the rules.</i></li>
+    <li><b>ATT&amp;CK matrix</b>: coverage of the case built from your matched Sigma rules across every loaded set — techniques grouped by tactic, colored by level, click to jump to a sample event (rules need <code>attack.*</code> tags).</li>
+    <li><b>Lookalike</b>: binaries within a Levenshtein distance of a legit one (cmd2.exe, svch0st.exe…), across <i>all</i> sources (Sysmon Image and Security 4688).</li>
    </ul>
 
-   <h3>Sigma</h3>
+   <h3>Hunting (grouped under “Hunting ▾”)</h3>
    <ul>
-    <li>Run <b>Sigma</b> rules over the logs (historical detection). Drop your <code>.yml</code> files in <code>reglas_sigma/</code> (or upload them) and click <b>Load rules</b> → <b>Run</b>. Both <b>loading</b> (file by file) and running show a <b>progress bar</b>.</li>
-    <li>Only <b>Linux</b> and <b>webserver</b> rules whose logsource is present are applied; the rest are skipped. Rules using something unsupported are skipped with a reason.</li>
-    <li>Each finding carries a level and ATT&amp;CK; clicking a hit jumps to its context in the Explorer.</li>
-    <li><b>Expand a detection</b> to see the <b>full rule (YAML)</b> that fired and the <b>structured raw log</b> of the matching event, side by side with the event fields.</li>
-    <li>Every finding has the triage buttons (<b>⎘ copy</b>, <b>view structured</b> and the <b>mark</b> buttons) and an <b>add to review</b> action, so you can triage without leaving the tab.</li>
-    <li>Requires <code>pysigma</code> installed; if missing, the tab warns and everything else still works.</li>
+    <li><b>Proc tree</b> — Sigma <code>process_creation</code> (Sysmon EID1 <i>and</i> Security 4688), anchored on a PID / ProcessGuid / image; linked by GUID when present, else by PID.</li>
+    <li><b>Logons</b> — the authentication family: Security logons, Kerberos (4768/4769/4771), NTLM (4776), RDP (4778/4779, TerminalServices 1149/21-25). Filter by user/type/source IP/workstation/auth/host.</li>
+    <li><b>Persistence</b> — ~65 ASEP registry locations (Sysmon 12/13/14 and Security 4657), Startup &amp; dropped task XML (Sysmon 11), services (7045/4697/7040), scheduled tasks, WMI, accounts/groups, BITS.</li>
+    <li><b>PowerShell</b> — 4104 script blocks, reassembled; type a string to find only the scripts that contain it, with the match highlighted.</li>
+    <li><b>Network</b> — Sysmon EID3 + DNS 22 plus native Windows Filtering Platform (5156/5157 allow/block, 5158 bind); filter by IP/host, port, protocol, process or kind.</li>
    </ul>
 
-   <h3>ATT&amp;CK</h3>
+   <h3>AI (grouped under “AI ▾”), Overview, Marks &amp; Report</h3>
    <ul>
-    <li>Projects the Sigma findings onto the <b>MITRE ATT&amp;CK</b> matrix: each technique seen in the logs lights up with its hit count. Click a technique to jump to a sample event's context; each tile also has a <b>&#43;</b> to send a sample of that technique to review.</li>
+    <li><b>AI (API)</b>, <b>AI (local)</b> and <b>MCP</b> are grouped under the AI parent tab.</li>
+    <li><b>Overview</b>: tops (EventID, Image, host, user, logon type), source/destination IPs with GeoIP (internal/external, country · ASN · Org/ISP with DB-IP Lite). On startup GeoIP <b>auto-updates in the background</b> only if the base is missing or older than 30 days (silent without network).</li>
+    <li><b>Marks</b>: triage events (pending/TP/FP/dismissed) saved in the case <code>.duckdb</code>. The <b>mark buttons appear in every detection view</b> (Sigma, LOL, Lookalike, ATT&amp;CK, Network, Logons, Persistence, Proc tree, IOC sweep); each mark from a detection <b>freezes a context of the 10 surrounding events</b> plus the rule/source, and marks can be <b>deleted with confirmation</b>. <b>Report</b>: self-contained HTML of the whole case.</li>
    </ul>
 
-   <h3>Network</h3>
-   <ul>
-    <li>Network-connectivity view built from the parsed logs (connections, source/destination IPs and ports, auth from remote hosts…). Rows carry the same triage buttons and jump to context; internal/external tagging and GeoIP apply as in the Dashboard.</li>
-   </ul>
+   <h3>SQL examples</h3>
+   <pre>-- process creations with a suspicious parent
+SELECT ts, host, image, command_line FROM events
+WHERE eid=1 AND source LIKE '%Sysmon%'
+  AND lower(parent_image) LIKE '%\\winword.exe' ORDER BY ts;
 
-   <h3>GTFOBins</h3>
-   <ul>
-    <li>Catalog of legitimate Unix binaries and how they are abused. Click <b>Update catalog (GitHub)</b> to fetch/refresh it (needs <code>git</code> or outbound to GitHub); stored in <code>gtfobins_data/gtfobins.json</code>.</li>
-    <li><b>Check executed binaries</b> cross-references the catalog with what was actually run in the logs (auditd <code>execve</code>, <code>bash_history</code>, what was launched via <code>sudo</code>, and the real binary inside <b>BSD appliance shell logs</b> — <code>sh_command="…"</code> / <code>shell_command="…"</code> in <code>/var/log/sh.log</code> and <code>/var/log/bash.log</code>) and shows a section per binary with its techniques, abuse examples and contexts (<code>sudo</code>/<code>suid</code>/…).</li>
-    <li><b>View full catalog</b> lists the binaries with a filter; click one to see its invocations. In the results, each sample links to its context in the Explorer.</li>
-    <li><b>Privilege context</b>: each binary is tagged <b>via sudo</b>, <b>as root</b>, <b>⚠ escalation</b> (euid=0 with a non-root login) or <b>appliance shell</b> (executed from the BSD appliance shell, a privileged context); the dangerous ones come first and in red. The real SUID bit is not observable from logs alone.</li>
-    <li><b>Where it ran</b> lists up to 200 examples per binary; when there are more, the header shows «showing N of TOTAL» and a <b>See all N</b> button loads every hit. Each sample links to its context, and carries the <b>⎘ copy</b> and <b>mark</b> buttons.</li>
-   </ul>
+-- failed logons by source IP
+SELECT src_ip, count(*) n FROM events
+WHERE source='Security' AND eid=4625 GROUP BY src_ip ORDER BY n DESC;
 
-   <h3>Overview (Dashboard)</h3>
-   <ul>
-    <li>Counters, time range, events per hour and <i>tops</i> of IPs, users, binaries and programs. Each row jumps to the Explorer already filtered.</li>
-    <li><b>GeoIP</b>: IPs are always tagged <b>internal</b>/<b>external</b> (no database needed). With <b>Update GeoIP database</b> the free <b>DB-IP Lite</b> bases are downloaded and then country, ASN and Org/ISP are shown (offline once downloaded). On startup the app <b>auto-updates GeoIP in the background</b> only if the base is missing or older than 30 days — silent if there's no network. Top source IPs here show <b>ASN · Org/ISP</b> inline.</li>
-   </ul>
-
-   <h3>Marks (triage)</h3>
-   <ul>
-    <li>Mark events as <b>pending / TP / FP / dismissed</b> with a note, from the «Mark event» button in the context or by adding the event <b>#</b>.</li>
-    <li>The <b>mark buttons are available in every detection view</b> — Sigma, IOC sweep, ATT&amp;CK, Network, GTFOBins — right next to the copy / view-structured buttons, so you can triage a hit where you see it.</li>
-    <li>Each mark created from a detection <b>freezes a context of the 10 surrounding events</b> plus the <b>rule/source</b> that produced it, so the triage record stays self-contained even if the logs change later.</li>
-    <li>Marks can be <b>deleted</b> (with a confirmation prompt) and edited. They are stored <b>inside the case <code>.duckdb</code></b> (persist across restarts). Filter by status and jump to context.</li>
-   </ul>
-
-   <h3>SQL — most common filters</h3>
-   <p>Everything is queried over the <code>events</code> table. Typical filters:</p>
-   <pre>-- by source and event type
-WHERE source = 'auth'
-WHERE event IN ('ssh_failed','ssh_accepted')
-
--- by IP, user or executable
-WHERE src_ip = '203.0.113.55'
-WHERE user = 'root'
-WHERE exe = '/usr/bin/wget'
-
--- partial text (like a grep)
-WHERE message ILIKE '%/etc/passwd%'
-WHERE raw ILIKE '%wget%'
-
--- time range (always in UTC)
-WHERE ts BETWEEN TIMESTAMP '2026-09-30 20:00:00'
-             AND TIMESTAMP '2026-09-30 20:15:00'
-
--- HTTP with error
-WHERE source = 'access' AND status >= 400</pre>
-
-   <h3>SQL — the <code>extra</code> JSON field (auditd)</h3>
-   <p>auditd-specific fields (syscall, key, serial, acct…) live in the JSON
-   <code>extra</code> column. Read them with <code>extra-&gt;&gt;'field'</code>, but DuckDB
-   requires <b>wrapping it in parentheses</b>:</p>
-   <pre>SELECT ts, exe, (extra-&gt;&gt;'key') AS rule
-FROM events
-WHERE source='auditd' AND (extra-&gt;&gt;'key') IS NOT NULL;</pre>
-   <p>Alternative without parentheses: <code>json_extract_string(extra, '$.key')</code>.</p>
-
-   <h3>Useful values</h3>
-   <p><b>source</b>: auth, syslog, kern, cron, access, auditd, weberror, logfmt, applog, bash_history, <b>csv</b>, <b>dmesg</b>, <b>apt</b>, <b>fontconfig</b>, <b>udev</b>.</p>
-   <p><b>event</b>: ssh_accepted, ssh_failed, ssh_invalid_user, sudo, session_opened/closed,
-   http_request, execve, syscall, user_auth, web_error, command, kernel, dpkg, uevent.</p>
-   <p>Columns: <a href="/schema" target="_blank">see all at /schema</a>. In the
-   <b>SQL</b> tab there's a dropdown with ready-made example queries.</p>
-
-   <h3>Recognised log formats</h3>
-   <ul>
-    <li><b>CSV</b> — comma-separated files. The header row (if present) names the fields; each row becomes one event. Known columns (user, ip, status, time…) map to real columns, the rest land in <code>extra</code> (toggle them in the <b>Columns</b> panel). Values with commas are handled if quoted.</li>
-    <li><b>dmesg</b> — kernel ring buffer (<code>[&nbsp;&nbsp;&nbsp;0.000000] message</code>). One line = one event. The bracket is <b>seconds since boot</b>, not a date, so these events carry no timeline timestamp (the offset is kept in <code>extra.ktime</code>) — they're still fully searchable.</li>
-    <li><b>apt / dpkg term.log</b> — <code>Log started:</code> … <code>Log ended:</code> blocks; each block is one event (timestamp from «Log started», package actions summarised, whole block in <code>raw</code>).</li>
-    <li><b>fontconfig / fc-cache</b> — one line per event.</li>
-    <li><b>udevadm monitor</b> — <code>UEVENT[epoch]</code> / <code>UDEV [epoch]</code> blocks separated by a blank line; each block is one event (epoch → real UTC time, the <code>KEY=value</code> lines go to <code>extra</code>).</li>
-   </ul>
-   <p class="hintlbl">Best results come from loading each format as its own file. A single file that mixes several formats is still fully ingested (nothing is dropped), but it's detected as one type.</p>
-
-   <h3>When loading logs</h3>
-   <p>Several logs (syslog/auth/kern/cron, applog and the web error.log) don't store their
-   timezone. By default <b>UTC (offset 0)</b> is assumed. If your logs are in local time,
-   give the offset in minutes when loading (field in the Load tab, <code>--tz</code> in the
-   CLI or <code>tz_offset_minutes</code> in the API): <b>+120</b> = CEST (Spain summer),
-   <b>+60</b> = CET, <b>-300</b> = EST. That way everything is in UTC and the timeline lines up.
-   access and auditd are already in UTC and left untouched.
-   Only text logs are accepted (a binary is rejected); folders and archives
-   (.tar.gz/.zip/.gz…) are extracted and walked automatically.</p>
-   <p>When reading from a <b>server path</b>, the progress bar now advances <b>by bytes</b>
-   (reading X / Y MB · %), so it moves smoothly <i>within</i> a single large file, not just
-   file by file. Events are inserted in batches as the file is read.</p>
+-- a value from EventData (extra)
+SELECT ts, image, extra-&gt;&gt;'TargetObject' AS target
+FROM events WHERE eid=13 ORDER BY ts;</pre>
   </div>
  </section>
 </main>
@@ -1934,13 +2111,28 @@ WHERE source='auditd' AND (extra-&gt;&gt;'key') IS NOT NULL;</pre>
  </div>
 </div>
 <footer style="border-top:1px solid var(--border);margin-top:24px;padding:14px 16px;text-align:center;color:var(--muted);font-size:12px">
- <svg viewBox="0 0 24 24" width="1.2em" height="1.2em" style="vertical-align:-.26em" aria-label="chorizo"><path d="M18.7 5.8 L20.9 3.9 M18.7 5.8 L20.3 7.9" fill="none" stroke="#141414" stroke-width="1.6" stroke-linecap="round"/><path d="M6.2 18.4 C10 21.2 17.4 19.6 18.6 6.6" fill="none" stroke="#141414" stroke-width="7.8" stroke-linecap="round"/><path d="M6.2 18.4 C10 21.2 17.4 19.6 18.6 6.6" fill="none" stroke="#e0485a" stroke-width="5.6" stroke-linecap="round"/><path d="M7.4 16.8 C10 18.6 15.4 17.6 16.8 8" fill="none" stroke="#f58a95" stroke-width="1.6" stroke-linecap="round" opacity=".85"/><path d="M10.6 19.9 l1.3 -2.4" stroke="#141414" stroke-width="1.6" stroke-linecap="round"/><path d="M14.8 19.2 l1.2 -2.3" stroke="#141414" stroke-width="1.6" stroke-linecap="round"/><path d="M3.7 20.2 L6.4 18.2 L5.9 21.2 Z" fill="#e0485a" stroke="#141414" stroke-width="1.1" stroke-linejoin="round"/></svg> Longanizer &middot; made by <b style="color:var(--accent)">gmzpt</b>
+ &#128302; WinHound &middot; made by <b style="color:var(--accent)">gmzpt</b>
 </footer>
 <script>
 function esc(v){if(v===null||v===undefined)return '<span class=muted>&#8709;</span>';return String(v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-/* Pestañas agrupadas: un padre abre una sub-barra con sus hijos. */
-const GROUPS={ai:['ai','ailocal','mcp']};
-let GROUP_LAST={ai:'ai'};
+/* Celda truncada: muchas columnas (extra JSON, command_line, hashes) son muy
+   largas; renderizarlas enteras x miles de filas satura el DOM y ralentiza la
+   UI. Mostramos ~240 chars y dejamos el resto en el tooltip (title, ~4000). */
+const CELL_MAX=240, CELL_TITLE_MAX=4000;
+function tdCell(v,cls){
+ const ca=cls?(' class="'+cls+'"'):'';
+ if(v===null||v===undefined)return '<td'+ca+'><span class=muted>&#8709;</span></td>';
+ const s=String(v);
+ const disp=s.length>CELL_MAX?esc(s.slice(0,CELL_MAX))+'<span class="muted">…</span>':esc(s);
+ const title=esc(s.length>CELL_TITLE_MAX?s.slice(0,CELL_TITLE_MAX)+'…':s);
+ return '<td'+ca+' title="'+title+'">'+disp+'</td>';
+}
+/* Pestañas agrupadas: un padre en la barra superior abre una sub-barra con sus
+   hijos, para que la barra no quede tan larga. */
+const GROUPS={ai:['ai','ailocal','mcp'],
+              sigma:['sigma','lol_lolbas','lol_loldrivers','lol_lolrmm','lol_hijacklibs','lol_lottunnels','lookalike','attack'],
+              hunt:['proctree','logons','persist','powershell','network']};
+let GROUP_LAST={ai:'ai', sigma:'sigma', hunt:'proctree'};
 function groupOf(t){ for(const g in GROUPS){ if(GROUPS[g].includes(t)) return g; } return null; }
 function openGroup(g){ switchTab(GROUP_LAST[g]||GROUPS[g][0]); }
 function switchTab(t){
@@ -1949,22 +2141,31 @@ function switchTab(t){
  document.querySelectorAll('.tab').forEach(x=>{
   const dt=x.dataset.tab;
   if(dt==='__ai') x.classList.toggle('active', g==='ai');
+  else if(dt==='__sigma') x.classList.toggle('active', g==='sigma');
+  else if(dt==='__hunt') x.classList.toggle('active', g==='hunt');
   else x.classList.toggle('active', dt===t);
  });
  document.querySelectorAll('.panel').forEach(x=>x.classList.toggle('active',x.id===t));
- const sa=document.getElementById('subnav_ai');
+ const sa=document.getElementById('subnav_ai'), sg=document.getElementById('subnav_sigma'), sh=document.getElementById('subnav_hunt');
  if(sa) sa.classList.toggle('hidden', g!=='ai');
+ if(sg) sg.classList.toggle('hidden', g!=='sigma');
+ if(sh) sh.classList.toggle('hidden', g!=='hunt');
  document.querySelectorAll('.subtab').forEach(x=>x.classList.toggle('active',x.dataset.tab===t));
  if(t==='mcp')loadMcpHelp();
  if(t==='sigma')sigmaInit();
  if(t==='dash' && !DASH_LOADED){ DASH_LOADED=true; loadDash(); geoStatus(); }
  if(t==='marks') loadMarks();
+ if(t.indexOf('lol_')===0) buildLolTab(t.slice(4));
+ if(t==='proctree' && !document.getElementById('pt_out').innerHTML) loadProctree();
+ if(t==='logons' && !document.getElementById('lo_out').innerHTML) loadLogons();
+ if(t==='persist' && !document.getElementById('pe_out').innerHTML) loadPersist();
+ if(t==='powershell' && !document.getElementById('ps_out').innerHTML) loadPS();
  if(t==='network' && !document.getElementById('nw_out').innerHTML) loadNetwork();
  if(t==='attack' && !document.getElementById('at_out').innerHTML) loadAttack();
  if(t==='iocx' && !document.getElementById('iocx_out').innerHTML) loadIocx();
 }
 /* autocompletado de campos para la caja de búsqueda (sintaxis campo:valor) */
-const QFIELDS=['source','host','program','user','src_ip','src_port','exe','method','path','status','event','message','asn','org','ts'];
+const QFIELDS=['source','host','eid','user','sid','src_ip','dst_ip','image','command_line','parent_image','original_filename','hashes','target_filename','image_loaded','logon_type','asn','org','level','message','ts'];
 let QAC_FIELDS=[];
 function buildFieldList(){
  QAC_FIELDS=QFIELDS.map(f=>f+':').concat((XKEYS||[]).map(k=>'x:'+k+':'));
@@ -1981,7 +2182,6 @@ function qacUpdate(){
  const v=inp.value, pos=inp.selectionStart==null?v.length:inp.selectionStart;
  const b=qacTokenBounds(v,pos); let tok=v.slice(b.start,b.end);
  let neg=''; if(tok[0]==='-'){ neg='-'; tok=tok.slice(1); }
- // no sugerir una vez el token ya trae operador de valor
  if(tok==='' || tok.indexOf(':')>=0 || tok.indexOf('=')>=0 || tok.indexOf('!')>=0){ qacHide(); return; }
  const low=tok.toLowerCase();
  QAC_MATCHES=QAC_FIELDS.filter(f=>f.toLowerCase().startsWith(low)).slice(0,12);
@@ -2021,11 +2221,13 @@ async function loadFacets(){
  const out=document.getElementById('fac_out');
  const field=document.getElementById('facfield').value;
  out.innerHTML='<span class="muted">computing…</span>';
+ const ee=document.getElementById('eid');
  // sigue la vista activa: en el timeline completo se ignora la caja (como el timeline)
  const qv=(LASTVIEW==='timeline')?'':document.getElementById('q').value.trim();
  const body={field, q:qv,
    regex:document.getElementById('rgx').checked,
    source:document.getElementById('src').value,
+   eid:(ee&&ee.value&&ee.value!=='(all)')?ee.value:null,
    start:document.getElementById('tstart').value.trim()||null,
    end:document.getElementById('tend').value.trim()||null, limit:20};
  try{
@@ -2059,6 +2261,10 @@ async function refresh(){
   const cur=sel.value;
   sel.innerHTML='<option>(all)</option>'+j.by_source.map(x=>'<option>'+x.source+'</option>').join('');
   sel.value=cur;
+  const esel=document.getElementById('eid');
+  if(esel){ const ec=esel.value;
+   esel.innerHTML='<option>(all)</option>'+(j.by_eid||[]).map(x=>'<option value="'+x.eid+'">'+x.eid+' ('+x.count+')</option>').join('');
+   esel.value=ec; }
   mergeExtraKeys(j.extra_keys);
   buildFieldList();
   updateNav(j.total_events);
@@ -2130,7 +2336,7 @@ async function init(){
 
 /* ---------- Ingesta (por lotes, para que muchos ficheros vayan rapido) ---------- */
 const UP_CHUNK=50;  // ficheros por peticion: menos viajes HTTP = mas rapido
-function uploadChunk(files,tz,onprog){
+function uploadChunk(files,tz,onprog,opts){
  return new Promise((resolve,reject)=>{
   const xhr=new XMLHttpRequest();
   xhr.open('POST','/ingest/upload');
@@ -2138,9 +2344,9 @@ function uploadChunk(files,tz,onprog){
   xhr.onload=()=>{ try{const j=JSON.parse(xhr.responseText); xhr.status<400?resolve(j):reject(j.detail||'error');}catch(_){reject('invalid response');} };
   xhr.onerror=()=>reject('network error');
   const fd=new FormData();
-  fd.append('tz_offset_minutes',tz);
-  fd.append('catch_all', document.getElementById('catchall').checked ? 'true':'false');
   for(const f of files){ fd.append('files',f); fd.append('relpaths', f.webkitRelativePath || f.name); }
+  if(opts&&opts.ts_from) fd.append('ts_from_str',opts.ts_from);
+  if(opts&&opts.ts_to)   fd.append('ts_to_str',opts.ts_to);
   xhr.send(fd);
  });
 }
@@ -2148,6 +2354,14 @@ function clearPicks(){
  document.getElementById('files').value='';
  document.getElementById('folder').value='';
  document.getElementById('ingmsg').textContent='selection cleared';
+}
+function applyTsPreset(sfx,days){
+ if(!days){document.getElementById('ts_from_'+sfx).value='';document.getElementById('ts_to_'+sfx).value='';return;}
+ const now=new Date(),from=new Date(now-parseInt(days)*86400000);
+ const fmt=d=>d.toISOString().slice(0,10);
+ document.getElementById('ts_from_'+sfx).value=fmt(from);
+ document.getElementById('ts_to_'+sfx).value=fmt(now);
+ document.getElementById('ts_preset_'+sfx).value='';
 }
 let INGESTED=[];  // manifiesto acumulado de ficheros procesados
 /* Ingesta desde una ruta del propio servidor (sin subir por el navegador):
@@ -2166,15 +2380,16 @@ async function ingestPath(){
  const prog=document.getElementById('prog');
  const path=document.getElementById('spath').value.trim();
  if(!path){msg.textContent='Enter a server path.';return}
- const tz=parseInt(document.getElementById('tzp').value,10)||0;
  const t0=Date.now();
  msg.textContent='reading from disk: '+path+' … · started '+_clock(t0);
  prog.style.display=''; prog.value=0;
  let total=0, done=0, ev=0, ok=0, skip=0, err=0, totalBytes=0, bytesDone=0;
  const hb=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':(n>=1024?(n/1024).toFixed(0)+' KB':n+' B');
  try{
+  const tsFrom=(document.getElementById('ts_from_path')||{}).value||undefined;
+  const tsTo=(document.getElementById('ts_to_path')||{}).value||undefined;
   const r=await fetch('/ingest/path/stream',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({path,tz_offset_minutes:tz,catch_all:document.getElementById('catchall').checked})});
+    body:JSON.stringify({path,ts_from:tsFrom,ts_to:tsTo})});
   if(!r.ok){ let d=''; try{d=(await r.json()).detail;}catch(_){} prog.style.display='none';
     msg.innerHTML='<span class="err">'+esc(d||('error '+r.status))+'</span>'; return; }
   const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
@@ -2188,10 +2403,10 @@ async function ingestPath(){
     if(!line)continue;
     let x; try{x=JSON.parse(line);}catch(_){continue;}
     if(x.total!=null){ total=x.total; if(x.total_bytes!=null) totalBytes=x.total_bytes; continue; }
-    if(x.progress_bytes!=null){ // progreso POR BYTES (incl. dentro de un fichero)
+    if(x.progress_bytes!=null){ // progreso POR BYTES (incl. dentro de un .evtx)
      bytesDone=x.progress_bytes;
      if(totalBytes>0){ const p=Math.min(99,Math.round(bytesDone/totalBytes*100)); prog.value=p;
-       msg.textContent='reading '+hb(bytesDone)+' / '+hb(totalBytes)+' · '+p+'% · '+ev+' events · '+ingClock(t0,bytesDone/totalBytes,false); }
+       msg.textContent='reading '+hb(bytesDone)+' / '+hb(totalBytes)+' · '+p+'% · '+ev+' events · '+ingClock(t0,bytesDone/totalBytes,true); }
      continue;
     }
     if(x.fatal){ INGESTED.push({file:path,error:x.fatal}); err++; done++; continue; }
@@ -2200,14 +2415,13 @@ async function ingestPath(){
     if(x.events!=null){ok++; ev+=x.events; done++;}
     else if(x.skipped){skip++; done++;}
     else if(x.error){err++; done++;}
-    // % preferentemente por bytes; si no hay bytes, por ficheros
     let pct=null;
     if(totalBytes>0) pct=Math.min(99,Math.round(bytesDone/totalBytes*100));
     else if(total>0) pct=Math.min(99,Math.round(done/total*100));
     if(pct!=null) prog.value=pct;
     const denom=(total>0 && done<=total)?('/≈'+total):'';
     const fr=(totalBytes>0)?(bytesDone/totalBytes):(total>0?done/total:0);
-    msg.textContent='processing '+done+denom+' files'+(pct!=null?' · '+pct+'%':'')+' · '+ev+' events · '+ingClock(t0,fr,false);
+    msg.textContent='processing '+done+denom+' files'+(pct!=null?' · '+pct+'%':'')+' · '+ev+' events · '+ingClock(t0,fr,true);
     if(done%25===0) renderIngested();
    }
   }
@@ -2222,7 +2436,7 @@ async function uploadFiles(){
  const prog=document.getElementById('prog');
  const picks=[...document.getElementById('files').files, ...document.getElementById('folder').files];
  if(!picks.length){msg.textContent='Pick files or a folder first.';return}
- const tz=document.getElementById('tz').value||'0';
+ const tz='0';
  const total=picks.length;
  const t0=Date.now();
  let done=0, ev=0, ok=0, skip=0, err=0;
@@ -2231,8 +2445,10 @@ async function uploadFiles(){
   const chunk=picks.slice(i,i+UP_CHUNK);
   msg.textContent='uploading '+(done+1)+'-'+(done+chunk.length)+' / '+total+' files · '+ingClock(t0,done/total,false);
   try{
-   const j=await uploadChunk(chunk,tz,frac=>{ const f=(done+frac*chunk.length)/total; prog.value=Math.round(f*100);
-     msg.textContent='uploading '+(done+1)+'-'+(done+chunk.length)+' / '+total+' files · '+Math.round(f*100)+'% · '+ingClock(t0,f,false); });
+   const uTsFrom=(document.getElementById('ts_from_up')||{}).value||null;
+  const uTsTo=(document.getElementById('ts_to_up')||{}).value||null;
+  const j=await uploadChunk(chunk,tz,frac=>{ const f=(done+frac*chunk.length)/total; prog.value=Math.round(f*100);
+     msg.textContent='uploading '+(done+1)+'-'+(done+chunk.length)+' / '+total+' files · '+Math.round(f*100)+'% · '+ingClock(t0,f,false); },{ts_from:uTsFrom,ts_to:uTsTo});
    for(const x of (j.ingested||[])){
     INGESTED.push(x);
     if(x.events!=null){ok++; ev+=x.events;} else if(x.skipped){skip++;} else if(x.error){err++;}
@@ -2256,42 +2472,50 @@ function renderIngested(){
  const box=document.getElementById('ingested');
  if(!INGESTED.length){box.innerHTML='';return}
  const loaded =INGESTED.filter(x=>x.events!=null);
- const skipped=INGESTED.filter(x=>x.skipped);
- const errored=INGESTED.filter(x=>x.error);
  const archived=INGESTED.filter(x=>x.archive && !x.error);
- let h='<div class="count">'+loaded.length+' loaded · '+skipped.length+' skipped · '+errored.length+' errored'
-      +(archived.length?' · '+archived.length+' archives':'')+'</div>';
- h+=secOK('✓ Loaded ('+loaded.length+')', loaded);
- h+=secFail('⤼ Skipped ('+skipped.length+')','skipped','st-skip', skipped);
- h+=secFail('✗ Errored ('+errored.length+')','error','st-err', errored);
- if(archived.length){
-  h+='<h3 class="st-arc">📦 Extracted archives ('+archived.length+')</h3>';
-  h+='<div class="wrap"><table><thead><tr><th>file</th></tr></thead><tbody>';
-  for(const x of archived) h+='<tr><td>'+esc(x.archive)+'</td></tr>';
-  h+='</tbody></table></div>';
+ // "No ingestado" = saltados (no .evtx, etc.) + con error de parseo
+ const notIng =INGESTED.filter(x=>x.skipped!=null || x.error!=null);
+ const totalEv=loaded.reduce((a,x)=>a+(x.events||0),0);
+ let h='<div class="count">'+loaded.length+' loaded · '+totalEv.toLocaleString()+' events · '
+      +notIng.length+' not ingested'+(archived.length?' · '+archived.length+' archives':'')+'</div>';
+ // Cargados: colapsable (con 562 ficheros no debe dominar la vista)
+ if(loaded.length){
+  const open=loaded.length<=40?' open':'';
+  h+='<details class="ingsec"'+open+'><summary class="st-ok">✓ Loaded ('+loaded.length+')</summary>'
+    +'<div class="wrap"><table><thead><tr><th>file</th><th>events</th></tr></thead><tbody>';
+  for(const x of loaded) h+='<tr><td title="'+esc(x.file)+'">'+esc(x.file)+'</td><td>'+esc(x.events)+'</td></tr>';
+  h+='</tbody></table></div></details>';
  }
+ if(archived.length){
+  h+='<details class="ingsec"><summary class="st-arc">📦 Extracted archives ('+archived.length+')</summary>'
+    +'<div class="wrap"><table><thead><tr><th>file</th></tr></thead><tbody>';
+  for(const x of archived) h+='<tr><td>'+esc(x.archive)+'</td></tr>';
+  h+='</tbody></table></div></details>';
+ }
+ // Tabla de NO ingestados, siempre al final (con el motivo por fichero)
+ h+=secNotIngested(notIng);
  box.innerHTML=h;
 }
-function secOK(title,list){
- if(!list.length)return '';
- let h='<h3 class="st-ok">'+title+'</h3><div class="wrap"><table><thead><tr><th>file</th><th>type</th><th>events</th></tr></thead><tbody>';
- for(const x of list) h+='<tr><td title="'+esc(x.file)+'">'+esc(x.file)+'</td><td>'+esc(x.type)+'</td><td>'+esc(x.events)+'</td></tr>';
- return h+'</tbody></table></div>';
-}
-function secFail(title,key,cls,list){
- if(!list.length)return '';
- let h='<h3 class="'+cls+'">'+title+'</h3><div class="wrap"><table><thead><tr><th>file</th><th>reason</th><th>first lines</th></tr></thead><tbody>';
+function secNotIngested(list){
+ if(!list.length) return '<h3 class="st-ok" style="margin-top:18px">Not ingested (0)</h3>'
+   +'<p class="muted">Every file was ingested — nothing skipped or failed.</p>';
+ let h='<h3 class="st-err" style="margin-top:18px">Not ingested ('+list.length+')</h3>'
+   +'<div class="muted" style="margin-bottom:6px">Files that were skipped or failed to parse, with the reason for each.</div>'
+   +'<div class="wrap"><table><thead><tr><th>file</th><th>status</th><th>reason</th></tr></thead><tbody>';
  for(const x of list){
   const name=x.file||x.archive||'';
-  h+='<tr><td title="'+esc(name)+'">'+esc(name)+'</td><td title="'+esc(x[key])+'">'+esc(x[key])+'</td>'
-    +'<td class="prevcell"><pre class="prev">'+esc(x.preview||'')+'</pre></td></tr>';
+  const isErr=x.error!=null;
+  const reason=isErr?x.error:x.skipped;
+  h+='<tr><td title="'+esc(name)+'">'+esc(name)+'</td>'
+    +'<td><span class="'+(isErr?'st-err':'st-skip')+'">'+(isErr?'error':'skipped')+'</span></td>'
+    +'<td title="'+esc(reason)+'">'+esc(reason)+'</td></tr>';
  }
  return h+'</tbody></table></div>';
 }
 
 /* Columnas mostradas en las tablas de resultados/timeline/contexto */
-const BASECOLS=['seq','ts','source','host','program','pid','severity','user','src_ip','asn','org','src_port','method','path','status','bytes','exe','event','message','referer','user_agent','extra','src_file'];
-const LABELS={seq:'#',src_file:'file',user_agent:'user-agent',asn:'ASN',org:'Org/ISP'};
+const BASECOLS=['seq','ts','source','eid','host','program','event','level','user','sid','src_ip','dst_ip','asn','org','image','command_line','parent_image','original_filename','hashes','target_filename','image_loaded','logon_type','record_id','message','extra','src_file'];
+const LABELS={seq:'#',src_file:'file',src_ip:'SourceIp',dst_ip:'DestinationIp',asn:'ASN',org:'Org/ISP',command_line:'CommandLine',parent_image:'ParentImage',original_filename:'OriginalFileName',target_filename:'TargetFilename',image_loaded:'ImageLoaded',logon_type:'LogonType',record_id:'EventRecordID',eid:'EventID',source:'Channel',program:'Provider',image:'Image',hashes:'Hashes'};
 function pageSize(){ const n=parseInt(document.getElementById('pagesize').value,10); return (Number.isInteger(n)&&n>0)?n:500; }
 /* ---- columnas: orden + mostrar/ocultar (persistido en localStorage) ----
    Cada columna es un campo base (p.ej. 'status') o una clave dinámica de
@@ -2300,19 +2524,22 @@ function pageSize(){ const n=parseInt(document.getElementById('pagesize').value,
 let COLS=loadOrder();
 let XKEYS=[];                 // claves de extra ya descubiertas
 let HIDDEN=loadHidden();
-/* claves de localStorage propias de LogAnalyzer (no compartir con EVTXray) */
-function loadOrder(){ try{const a=JSON.parse(localStorage.getItem('logan_colorder')||'null');
+/* claves de localStorage propias de WinHound (no compartir con la app de Linux,
+   que corre en el mismo 127.0.0.1 y pisaría el orden de columnas) */
+function loadOrder(){ try{const a=JSON.parse(localStorage.getItem('winhound_colorder')||'null');
   if(Array.isArray(a)&&a.length){ for(const c of BASECOLS){ if(!a.includes(c)) a.push(c); } return a; }
  }catch(_){} return BASECOLS.slice(); }
-function saveOrder(){ try{localStorage.setItem('logan_colorder',JSON.stringify(COLS));}catch(_){} }
-function loadHidden(){ try{return new Set(JSON.parse(localStorage.getItem('logan_hidden')||'[]'));}catch(_){return new Set();} }
-function saveHidden(){ try{localStorage.setItem('logan_hidden',JSON.stringify([...HIDDEN]));}catch(_){} }
+function saveOrder(){ try{localStorage.setItem('winhound_colorder',JSON.stringify(COLS));}catch(_){} }
+function loadHidden(){ try{return new Set(JSON.parse(localStorage.getItem('winhound_hidden')||'[]'));}catch(_){return new Set();} }
+function saveHidden(){ try{localStorage.setItem('winhound_hidden',JSON.stringify([...HIDDEN]));}catch(_){} }
 function isX(c){ return c.indexOf('x:')===0; }
 function colLabel(c){ return isX(c)?c.slice(2):(LABELS[c]||c); }
 function colClass(c){ return 'c-'+c.replace(/[^\w-]/g,'_'); }  // c-status / c-x_widget
-/* Sólo se renderizan como <td> las columnas visibles (las base siempre; las x:
-   dinámicas sólo cuando están visibles). Antes se pintaban TODAS y se ocultaban
-   por CSS: con muchos logs eran cientos de miles de celdas vacías -> lento. */
+/* Columnas que se RENDERIZAN como <td>: las base siempre (toggle vía CSS,
+   instantáneo), y las dinámicas (x:) solo cuando están visibles. Antes se
+   pintaban TODAS (incl. ~580 claves de extra ocultas) y se escondían por CSS:
+   con muchos logs eran cientos de miles de <td> vacíos -> la UI iba lentísima.
+   Ahora una fila típica pinta ~24 celdas en vez de ~600. */
 function renderCols(){ return COLS.filter(c=>!isX(c) || !HIDDEN.has(c)); }
 function applyCols(){ document.getElementById('colstyle').textContent=[...HIDDEN].map(c=>'.'+colClass(c)+'{display:none}').join(''); }
 function toggleCol(c,show){ if(show)HIDDEN.delete(c); else HIDDEN.add(c); saveHidden(); applyCols(); if(isX(c))rerender(); }
@@ -2343,7 +2570,7 @@ function buildColsPanel(){
    const up = i>0 ? '<button class="xs" onclick="event.stopPropagation();moveCol('+i+',-1)" title="move before">&#9664;</button>' : '';
    const dn = i<COLS.length-1 ? '<button class="xs" onclick="event.stopPropagation();moveCol('+i+',1)" title="move after">&#9654;</button>' : '';
    const tag = isX(c)?'<span class="xtag">extra</span>':'';
-   return '<div class="colchip '+(on?'on':'off')+'" onclick="clickCol(\''+c+'\')" title="'+(on?'hide':'show')+' '+lb+'">'
+   return '<div class="colchip '+(on?'on':'off')+'" data-n="'+esc(colLabel(c).toLowerCase())+'" onclick="clickCol(\''+c+'\')" title="'+(on?'hide':'show')+' '+lb+'">'
      +'<span class="coldot"></span><span class="collbl">'+lb+'</span>'+tag
      +'<span class="colmv">'+up+dn+'</span></div>';
  }).join('');
@@ -2352,20 +2579,28 @@ function buildColsPanel(){
    +'<button class="sec" onclick="allCols(false)">Hide all</button>'
    +'<button class="sec" onclick="hideEmptyCols()">Hide empty</button>'
    +'<button class="sec" onclick="resetCols()">Original order</button>'
+   +'<input type="text" id="colsearch" placeholder="filter columns…" oninput="colFilter()" value="'+esc(COLQ)+'" style="min-width:160px">'
    +'<span class="colcount">'+shown+' of '+COLS.length+' columns visible</span></div>'
-   +'<div class="colhint">Click a column to show or hide it · use &#9664; &#9654; to reorder · those tagged <span class="xtag">extra</span> come from the <code>extra</code> JSON</div>'
+   +'<div class="colhint">Click a column to show or hide it · use &#9664; &#9654; to reorder · those tagged <span class="xtag">extra</span> come from the <code>extra</code> JSON (EVTX EventData). Use the filter — Windows has many keys.</div>'
    +'<div class="colgrid">'+chips+'</div>';
+ if(COLQ) colFilter();
+}
+let COLQ='';
+function colFilter(){
+ const el=document.getElementById('colsearch'); if(el) COLQ=el.value;
+ const q=(COLQ||'').toLowerCase();
+ document.querySelectorAll('#colspanel .colchip').forEach(c=>{ c.style.display = c.dataset.n.includes(q)?'':'none'; });
 }
 function clickCol(c){ toggleCol(c, HIDDEN.has(c)); buildColsPanel(); }
 /* oculta las columnas que están vacías en los resultados mostrados ahora */
 function hideEmptyCols(){
  const rows=document.querySelectorAll('#hits table tbody tr');
  if(!rows.length)return;
- const cols=renderCols();
+ const cols=renderCols();           // sólo las visibles están pintadas
  cols.forEach((c,ci)=>{
   if(c==='seq'||c==='ts')return;
   let hasData=false;
-  rows.forEach(tr=>{const td=tr.children[ci+1]; if(td){const t=td.textContent.trim(); if(t && t!=='∅') hasData=true;}});  // +1: celda copiar
+  rows.forEach(tr=>{const td=tr.children[ci+1]; if(td){const t=td.textContent.trim(); if(t && t!=='∅') hasData=true;}});  // +1: celda de copiar
   if(!hasData) HIDDEN.add(c);
  });
  saveHidden(); applyCols(); buildColsPanel(); rerender();
@@ -2380,93 +2615,15 @@ function headHtml(sortable){
  }).join('')+'</tr></thead>';
 }
 function sortBy(c){ if(SORT.col===c){SORT.desc=!SORT.desc;}else{SORT.col=c;SORT.desc=false;} if(LASTVIEW==='timeline')showTimeline(); else doSearch(); }
-/* ================= Network (Linux) ================= */
-let NET_ROWS=[];
-function clearNet(){ for(const id of ['nw_ip','nw_port','nw_source','nw_event']) document.getElementById(id).value=''; loadNetwork(); }
-async function loadNetwork(){
- const out=document.getElementById('nw_out'), msg=document.getElementById('nw_msg');
- const qs=new URLSearchParams();
- const m={ip:'nw_ip',port:'nw_port',source:'nw_source',event:'nw_event'};
- for(const k in m){ const el=document.getElementById(m[k]); const v=el?el.value.trim():''; if(v) qs.set(k,v); }
- msg.textContent='loading…';
- try{ const j=await (await fetch('/network'+(qs.toString()?'?'+qs:''))).json(); msg.textContent=''; NET_ROWS=j.rows||[];
-  if(!NET_ROWS.length){ out.innerHTML='<p class="muted">No network events match.</p>'; return; }
-  let h='<div class="count">'+NET_ROWS.length+' network event(s) '
-    +'<button class="sec xcsv" onclick="csvObjs([\'ts\',\'source\',\'event\',\'src_ip\',\'src_port\',\'method\',\'path\',\'status\',\'exe\',\'user\',\'host\',\'detail\'],NET_ROWS,\'network.csv\')">&#8615; CSV</button></div>';
-  h+='<div class="wrap wide"><table><thead><tr><th class="acts"></th><th>ts</th><th>source</th><th>event</th><th>src IP</th><th>sport</th><th>method</th><th>path</th><th>status</th><th>exe</th><th>user</th><th>host</th></tr></thead><tbody>';
-  for(const n of NET_ROWS){ h+='<tr class="hitrow" onclick="openCtx('+n.id+')">'+actCell(n.id)+'<td>'+esc(n.ts)+'</td><td>'+esc(n.source)+'</td><td>'+esc(n.event)+'</td><td>'+esc(n.src_ip)+'</td><td>'+esc(n.src_port)+'</td><td>'+esc(n.method)+'</td><td title="'+esc(n.path)+'">'+esc((n.path||'').slice(0,60))+'</td><td>'+esc(n.status)+'</td><td title="'+esc(n.exe)+'">'+esc((n.exe||'').split('/').pop())+'</td><td>'+esc(n.user)+'</td><td>'+esc(n.host)+'</td></tr>'; }
-  out.innerHTML=h+'</tbody></table></div>';
- }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
-}
-/* ================= ATT&CK matrix (Linux) ================= */
-async function loadAttack(){
- const out=document.getElementById('at_out'), msg=document.getElementById('at_msg'),
-       prog=document.getElementById('at_prog'), btn=document.getElementById('at_btn');
- msg.textContent='running Sigma…'; if(prog){prog.style.display='';prog.value=0;} if(btn)btn.disabled=true;
- let j=null;
- try{
-  const r=await fetch('/attack/stream',{method:'POST'});
-  if(!r.ok){ let d=''; try{d=(await r.json()).detail;}catch(_){}
-    if(prog)prog.style.display='none'; if(btn)btn.disabled=false;
-    out.innerHTML='<p class="muted">'+esc(d||('error '+r.status))+'</p>'; msg.textContent=''; return; }
-  const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
-  for(;;){
-   const {value,done:fin}=await reader.read(); if(fin)break;
-   buf+=dec.decode(value,{stream:true}); let nl;
-   while((nl=buf.indexOf('\n'))>=0){
-    const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
-    if(!line)continue; let x; try{x=JSON.parse(line);}catch(_){continue;}
-    if(x.fatal){ if(prog)prog.style.display='none'; if(btn)btn.disabled=false;
-      out.innerHTML='<p class="muted">'+esc(x.fatal)+'</p>'; msg.textContent=''; return; }
-    if(x.done){ j=x.matrix||{}; continue; }
-    if(prog&&x.total>0) prog.value=Math.round(x.i/x.total*100);
-    msg.textContent='running rule '+x.i+'/'+x.total+' · '+x.found+' with findings…';
-   }
-  }
-  if(prog){prog.value=100;prog.style.display='none';} if(btn)btn.disabled=false;
-  msg.textContent='';
-  if(!j){ out.innerHTML='<p class="muted">incomplete response</p>'; return; }
-  if(j.error){ out.innerHTML='<p class="muted">'+esc(j.error)+'</p>'; return; }
-  if(!j.tactics||!j.tactics.length){ out.innerHTML='<p class="muted">No ATT&CK-tagged Sigma hits yet. Load and run your Sigma rules first — techniques come from the <code>attack.*</code> tags on each rule.</p>'; return; }
-  let h='<div class="count">'+j.total_findings+' matched rule(s) · click a technique to jump to a sample event</div><div class="attgrid">';
-  for(const col of j.tactics){
-   h+='<div class="attcol"><div class="atthead">'+esc(col.label)+' <span class="muted">('+col.techs.length+')</span></div>';
-   for(const t of col.techs){ const lv=t.level||'info';
-    const fid=(t.ids||[])[0];
-    const rev=fid?'<button class="revbtn atttechrev" title="add a sample of this technique to review (mark pending, 10-event context)" onclick="event.stopPropagation();addReview('+fid+',this)" data-regla="'+esc('ATT&CK '+t.tech)+'">&#43;</button>':'';
-    h+='<div class="atttech sev-'+lv+'" onclick="attackDrill(this)" data-ids="'+esc((t.ids||[]).join(','))+'" title="'+esc(t.rules.map(r=>r.title+' ('+r.count+')').join(' | '))+'">'+rev+'<span class="attt">'+esc(t.tech)+'</span><span class="attn">'+t.count+'</span></div>';
-   }
-   h+='</div>';
-  }
-  out.innerHTML=h+'</div>';
- }catch(e){ if(prog)prog.style.display='none'; if(btn)btn.disabled=false; msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
-}
-function attackDrill(el){ const ids=(el.dataset.ids||'').split(',').filter(Boolean); if(ids.length) sigmaGoto(parseInt(ids[0],10)); }
 /* valor de una celda: campo base o clave de extra (x:) */
 function cellVal(row,idx,c,xobj){ return isX(c) ? (xobj&&xobj[c.slice(2)]!=null?xobj[c.slice(2)]:'') : row[idx[c]]; }
 function parseExtra(row,idx){ try{ return row[idx.extra]?JSON.parse(row[idx.extra]):null; }catch(_){ return null; } }
-/* conjunto de campos que auditd tradujo de hex a texto (extra._dec = "cmd,cwd,…");
-   'cmd' marca la command line (columna message). */
-function decSet(xobj){ const s=new Set(); if(xobj&&xobj._dec){ for(const k of String(xobj._dec).split(',')) if(k) s.add(k); } return s; }
-const CELL_MAX=240, CELL_TITLE_MAX=4000;
-function tdCell(v,cls,dec){
- const ca=cls?(' class="'+cls+(dec?' xdec':'')+'"'):(dec?' class="xdec"':'');
- if(v===null||v===undefined)return '<td'+ca+'><span class=muted>&#8709;</span></td>';
- const s=String(v);
- const disp=s.length>CELL_MAX?esc(s.slice(0,CELL_MAX))+'<span class="muted">…</span>':esc(s);
- const title=esc(s.length>CELL_TITLE_MAX?s.slice(0,CELL_TITLE_MAX)+'…':s)+(dec?' — decoded from hex (auditd)':'');
- return '<td'+ca+' title="'+title+'">'+(dec?'<em>'+disp+'</em>':disp)+'</td>';
-}
 function rowCells(row,idx){
  const cols=renderCols();
- const needX=cols.some(isX)||cols.includes('message'); const xobj=needX?parseExtra(row,idx):null;
- const dec=decSet(xobj);
- return actCell(row[idx.id])+cols.map(function(c){
-   const isDec = isX(c) ? dec.has(c.slice(2)) : (c==='message' && dec.has('cmd'));
-   return tdCell(cellVal(row,idx,c,xobj), colClass(c), isDec);
- }).join('');
+ const needX=cols.some(isX); const xobj=needX?parseExtra(row,idx):null;
+ return actCell(row[idx.id])+cols.map(c=>tdCell(cellVal(row,idx,c,xobj), colClass(c))).join('');
 }
-/* portapapeles robusto + copiar evento completo */
+/* portapapeles robusto (clipboard API con fallback execCommand para http) */
 async function copyText(t){
  try{ if(navigator.clipboard && window.isSecureContext){ await navigator.clipboard.writeText(t); return true; } }catch(_){}
  try{ const ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); document.body.removeChild(ta); return ok; }catch(_){ return false; }
@@ -2478,15 +2635,15 @@ async function copyEvent(id,btn){
   flashBtn(btn, (await copyText(j.pretty||j.raw||''))?'✓':'✗');
  }catch(e){ flashBtn(btn,'✗'); }
 }
-/* añadir evento a revisar (marca 'pendiente' en Marks) con ~10 eventos de
-   contexto, y la regla si se marca desde una detección (via data-regla) */
+/* añadir evento a revisar (marca 'pendiente' en Marks) desde cualquier vista;
+   congela ~10 eventos de contexto, y la regla si se marcó desde una detección */
 async function addReview(id,btn){
  const regla=(btn&&btn.dataset&&btn.dataset.regla)?btn.dataset.regla:null;
  try{ const r=await fetch('/marks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({event_id:id,estado:'pendiente',regla:regla,ctx_n:10})});
   flashBtn(btn, r.ok?'✓':'✗');
  }catch(e){ flashBtn(btn,'✗'); }
 }
-/* ver el evento estructurado en una ventana modal (tablas y fuera de tablas) */
+/* ver el evento ESTRUCTURADO en una ventana modal (funciona en tablas y fuera) */
 async function showRaw(id){
  const ov=document.getElementById('rawmodal'); const pre=document.getElementById('rawmodalpre');
  pre.textContent='loading…'; ov.classList.remove('hidden'); ov.dataset.id=id;
@@ -2494,6 +2651,7 @@ async function showRaw(id){
 }
 function closeRaw(){ document.getElementById('rawmodal').classList.add('hidden'); }
 async function copyRawModal(btn){ const t=document.getElementById('rawmodalpre').textContent||''; flashBtn(btn,(await copyText(t))?'✓ copied':'✗'); }
+/* botones de acción (copiar · revisar · ver evento). `regla` opcional para marcar con contexto de detección */
 function _actBtns(id,regla){
  const dr=regla?(' data-regla="'+esc(regla)+'"'):'';
  return '<button class="copybtn" title="copy full event" onclick="event.stopPropagation();copyEvent('+id+',this)">&#10697;</button>'
@@ -2505,13 +2663,11 @@ function actInline(id,regla){ return '<span class="actinl">'+_actBtns(id,regla)+
 /* ---------- CSV ---------- */
 function csvCell(v){ if(v===null||v===undefined)return ''; let s=String(v); return /[",\n]/.test(s)?('"'+s.replace(/"/g,'""')+'"'):s; }
 function dlCSV(name,text){ const b=new Blob([text],{type:'text/csv;charset=utf-8'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),1500); }
-function csvTable(cols,rows,name){ if(!rows||!rows.length)return; const text=[cols.map(csvCell).join(',')].concat(rows.map(r=>r.map(csvCell).join(','))).join('\n'); dlCSV(name||'export.csv',text); }
+function csvTable(cols,rows,name){ if(!rows||!rows.length){return;} const text=[cols.map(csvCell).join(',')].concat(rows.map(r=>r.map(csvCell).join(','))).join('\n'); dlCSV(name||'export.csv',text); }
 function csvObjs(headers,objs,name){ const text=[headers.map(csvCell).join(',')].concat(objs.map(o=>headers.map(k=>csvCell(o[k])).join(','))).join('\n'); dlCSV(name,text); }
-function trStart(){ const e=document.getElementById('tstart'); return e?e.value.trim():''; }
-function trEnd(){ const e=document.getElementById('tend'); return e?e.value.trim():''; }
+
 /* ================= IOC extractor (discovered IOCs) ================= */
 let IOCX=null;
-const IOCX_HINT={ipv4:'IPv4 addresses',ipv6:'IPv6 addresses',domain:'domains',url:'URLs',email:'emails',sha256:'SHA256',sha1:'SHA1',md5:'MD5',imphash:'imphash',filepath:'file paths',registry:'registry keys',pipe:'named pipes',service:'services',task:'scheduled tasks'};
 async function loadIocx(){
  const out=document.getElementById('iocx_out'), msg=document.getElementById('iocx_msg'), btn=document.getElementById('iocx_btn');
  msg.textContent='extracting\u2026'; btn.disabled=true;
@@ -2629,8 +2785,8 @@ async function runIoc(){
    else if(r.asn||r.org) iogeo=' <span class="dtag ext">'+[r.asn,r.org].filter(Boolean).map(esc).join(' · ')+'</span>';
    h+='<div class="iocard '+cls+'"><div class="iohead">'+esc(r.ioc)+' — <b>'+r.count+'</b> event(s)'+iogeo+'</div>';
    if(r.hits.length){
-    h+='<div class="wrap"><table><thead><tr><th class="acts"></th><th>ts</th><th>source</th><th>program</th><th>host</th><th>user</th><th>detail</th></tr></thead><tbody>';
-    for(const x of r.hits){ h+='<tr class="hitrow" onclick="openCtx('+x.id+')">'+actCell(x.id)+'<td>'+esc(x.ts)+'</td><td>'+esc(x.source)+'</td><td>'+esc(x.program)+'</td><td>'+esc(x.host)+'</td><td>'+esc(x.user)+'</td><td>'+esc((x.detail||'').slice(0,220))+'</td></tr>'; }
+    h+='<div class="wrap"><table><thead><tr><th class="acts"></th><th>ts</th><th>eid</th><th>source</th><th>host</th><th>user</th><th>detail</th></tr></thead><tbody>';
+    for(const x of r.hits){ h+='<tr class="hitrow" onclick="sigmaGoto('+x.id+')">'+actCell(x.id)+'<td>'+esc(x.ts)+'</td><td>'+esc(x.eid)+'</td><td>'+esc(x.source)+'</td><td>'+esc(x.host)+'</td><td>'+esc(x.user)+'</td><td class="sgmatch">'+esc((x.detail||'').slice(0,220))+'</td></tr>'; }
     h+='</tbody></table></div>';
     if(r.count>r.hits.length) h+='<div class="muted" style="padding:4px 2px">… '+(r.count-r.hits.length)+' more (showing first '+r.hits.length+')</div>';
    }
@@ -2639,6 +2795,72 @@ async function runIoc(){
   out.innerHTML=h;
  }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
 }
+
+/* ================= Network ================= */
+let NET_ROWS=[];
+function clearNet(){ for(const id of ['nw_ip','nw_port','nw_proto','nw_img']) document.getElementById(id).value=''; document.getElementById('nw_kind').value=''; loadNetwork(); }
+async function loadNetwork(){
+ const out=document.getElementById('nw_out'), msg=document.getElementById('nw_msg');
+ const qs=new URLSearchParams();
+ const m={ip:'nw_ip',port:'nw_port',proto:'nw_proto',image:'nw_img',kind:'nw_kind'};
+ for(const k in m){ const el=document.getElementById(m[k]); const v=el?el.value.trim():''; if(v) qs.set(k,v); }
+ msg.textContent='loading…';
+ try{ const j=await (await fetch('/network'+(qs.toString()?'?'+qs:''))).json(); msg.textContent=''; NET_ROWS=j.rows||[];
+  if(!NET_ROWS.length){ out.innerHTML='<p class="muted">No network events match.</p>'; return; }
+  let h='<div class="count">'+NET_ROWS.length+' connection(s) '
+    +'<button class="sec xcsv" onclick="csvObjs([\'ts\',\'kind\',\'eid\',\'proto\',\'direction\',\'src_ip\',\'src_port\',\'dst_ip\',\'dst_port\',\'hostname\',\'dns_result\',\'app\',\'host\',\'user\'],NET_ROWS,\'network.csv\')">&#8615; CSV</button></div>';
+  h+='<div class="wrap wide"><table><thead><tr><th class="acts"></th><th>ts</th><th>kind</th><th>eid</th><th>proto</th><th>dir</th><th>src IP</th><th>sport</th><th>dst IP</th><th>dport</th><th>hostname / query</th><th>process</th><th>host</th><th>user</th></tr></thead><tbody>';
+  for(const n of NET_ROWS){ h+='<tr class="hitrow'+(n.kind==='blocked'?' failrow':'')+'" onclick="sigmaGoto('+n.id+')">'+actCell(n.id)+'<td>'+esc(n.ts)+'</td><td>'+esc(n.kind)+'</td><td>'+esc(n.eid)+'</td><td>'+esc(n.proto)+'</td><td>'+esc(n.direction)+'</td><td>'+esc(n.src_ip)+'</td><td>'+esc(n.src_port)+'</td><td>'+esc(n.dst_ip)+'</td><td>'+esc(n.dst_port)+'</td><td>'+esc(n.hostname||n.dns_result)+'</td><td title="'+esc(n.app)+'">'+esc(base(n.app))+'</td><td>'+esc(n.host)+'</td><td>'+esc(n.user)+'</td></tr>'; }
+  out.innerHTML=h+'</tbody></table></div>';
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+
+/* ================= ATT&CK matrix ================= */
+async function loadAttack(){
+ const out=document.getElementById('at_out'), msg=document.getElementById('at_msg'),
+       prog=document.getElementById('at_prog'), btn=document.getElementById('at_btn');
+ msg.textContent='running Sigma across loaded rule sets…'; if(prog){prog.style.display='';prog.value=0;} if(btn)btn.disabled=true;
+ let j=null;
+ try{
+  const r=await fetch('/attack/stream',{method:'POST'});
+  if(!r.ok){ let d=''; try{d=(await r.json()).detail;}catch(_){}
+    if(prog)prog.style.display='none'; if(btn)btn.disabled=false;
+    out.innerHTML='<p class="muted">'+esc(d||('error '+r.status))+'</p>'; msg.textContent=''; return; }
+  const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
+  for(;;){
+   const {value,done:fin}=await reader.read(); if(fin)break;
+   buf+=dec.decode(value,{stream:true}); let nl;
+   while((nl=buf.indexOf('\n'))>=0){
+    const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+    if(!line)continue; let x; try{x=JSON.parse(line);}catch(_){continue;}
+    if(x.fatal){ if(prog)prog.style.display='none'; if(btn)btn.disabled=false;
+      out.innerHTML='<p class="muted">'+esc(x.fatal)+'</p>'; msg.textContent=''; return; }
+    if(x.done){ j=x.matrix||{}; continue; }
+    if(prog&&x.total>0) prog.value=Math.round(x.i/x.total*100);
+    msg.textContent='running rule '+x.i+'/'+x.total+' · '+x.found+' with findings…';
+   }
+  }
+  if(prog){prog.value=100;prog.style.display='none';} if(btn)btn.disabled=false;
+  msg.textContent='';
+  if(!j){ out.innerHTML='<p class="muted">incomplete response</p>'; return; }
+  if(j.error){ out.innerHTML='<p class="muted">'+esc(j.error)+'</p>'; return; }
+  if(!j.tactics||!j.tactics.length){ out.innerHTML='<p class="muted">No ATT&CK-tagged Sigma hits yet. Load rules in the <b>Sigma</b> / <b>LOL</b> tabs first — techniques come from the <code>attack.*</code> tags on each rule.</p>'; return; }
+  let h='<div class="count">'+j.total_findings+' matched rule(s) across loaded sets · click a technique to jump to a sample event</div>';
+  h+='<div class="attgrid">';
+  for(const col of j.tactics){
+   h+='<div class="attcol"><div class="atthead">'+esc(col.label)+' <span class="muted">('+col.techs.length+')</span></div>';
+   for(const t of col.techs){
+    const lv=t.level||'info';
+    const fid=(t.ids||[])[0];
+    const rev=fid?'<button class="revbtn atttechrev" title="add a sample of this technique to review (mark pending, 10-event context)" onclick="event.stopPropagation();addReview('+fid+',this)" data-regla="'+esc('ATT&CK '+t.tech)+'">&#43;</button>':'';
+    h+='<div class="atttech sev-'+lv+'" onclick="attackDrill(this)" data-ids="'+esc((t.ids||[]).join(','))+'" title="'+esc(t.rules.map(r=>r.title+' ('+r.count+')').join(' | '))+'">'+rev+'<span class="attt">'+esc(t.tech)+'</span><span class="attn">'+t.count+'</span></div>';
+   }
+   h+='</div>';
+  }
+  out.innerHTML=h+'</div>';
+ }catch(e){ if(prog)prog.style.display='none'; if(btn)btn.disabled=false; msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+function attackDrill(el){ const ids=(el.dataset.ids||'').split(',').filter(Boolean); if(ids.length) sigmaGoto(parseInt(ids[0],10)); }
 /* filas <tr> clicables (abren el contexto del evento) */
 function rowTrs(j){
  const idx=Object.fromEntries(j.columns.map((c,i)=>[c,i]));
@@ -2653,10 +2875,14 @@ function tableHtml(j,bodyId){
  return '<div class="wrap wide"><table>'+headHtml(true)+'<tbody id="'+bodyId+'">'+rowTrs(j)+'</tbody></table></div>';
 }
 
+/* rango temporal global (aplica a búsqueda y timeline) */
+function trStart(){ return (document.getElementById('tstart')||{}).value?document.getElementById('tstart').value.trim():''; }
+function trEnd(){ return (document.getElementById('tend')||{}).value?document.getElementById('tend').value.trim():''; }
+function eidVal(){ const e=document.getElementById('eid'); const v=e?e.value:''; return (v&&v!=='(all)')?v:''; }
 /* ---------- Explorador: búsqueda paginada ---------- */
 let SE={q:'',regex:false,source:'',offset:0,total:0,start:'',end:'',cols:[],rows:[]};
 /* ---------- Historial y búsquedas guardadas (localStorage namespaced) ---------- */
-const QHIST_KEY='logan_qhistory', QSAVED_KEY='logan_qsaved';
+const QHIST_KEY='winhound_qhistory', QSAVED_KEY='winhound_qsaved';
 function qGet(k){ try{return JSON.parse(localStorage.getItem(k)||'[]');}catch(_){return [];} }
 function qSet(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch(_){} }
 function pushHistory(q){ q=(q||'').trim(); if(!q)return; let h=qGet(QHIST_KEY).filter(x=>x!==q); h.unshift(q); qSet(QHIST_KEY,h.slice(0,15)); }
@@ -2681,7 +2907,7 @@ async function doSearch(){
  pushHistory(q);
  hits.innerHTML='<p class="muted">searching…</p>';
  LASTVIEW='search';
- SE={q, regex:document.getElementById('rgx').checked, source:document.getElementById('src').value, offset:0, total:0, start:trStart(), end:trEnd(), cols:[], rows:[]};
+ SE={q, regex:document.getElementById('rgx').checked, source:document.getElementById('src').value, eid:eidVal(), offset:0, total:0, start:trStart(), end:trEnd(), cols:[], rows:[]};
  try{
   const j=await fetchSearch(0);
   if(!j){hits.innerHTML='<div class="err">error</div>';return}
@@ -2693,7 +2919,7 @@ async function doSearch(){
 }
 async function fetchSearch(offset){
  const r=await fetch('/search',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({q:SE.q,regex:SE.regex,source:SE.source,limit:pageSize(),offset,sort:SORT.col,desc:SORT.desc,start:SE.start||null,end:SE.end||null})});
+   body:JSON.stringify({q:SE.q,regex:SE.regex,source:SE.source,eid:SE.eid||null,limit:pageSize(),offset,sort:SORT.col,desc:SORT.desc,start:SE.start||null,end:SE.end||null})});
  return r.ok ? await r.json() : null;
 }
 async function loadMoreSearch(){
@@ -2721,7 +2947,7 @@ async function showTimeline(){
  const hits=document.getElementById('hits');
  document.getElementById('gotoout').innerHTML='';
  hits.innerHTML='<p class="muted">loading timeline…</p>';
- TL={source:document.getElementById('src').value, offset:0, total:0,
+ TL={source:document.getElementById('src').value, eid:eidVal(), offset:0, total:0,
      start:trStart(), end:trEnd(), cols:[], rows:[]};
  try{
   const j=await fetchTimeline(0);
@@ -2734,7 +2960,7 @@ async function showTimeline(){
 }
 async function fetchTimeline(offset){
  const r=await fetch('/timeline',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({source:TL.source,limit:pageSize(),offset,start:TL.start||null,end:TL.end||null,sort:SORT.col,desc:SORT.desc})});
+   body:JSON.stringify({source:TL.source,eid:TL.eid||null,limit:pageSize(),offset,start:TL.start||null,end:TL.end||null,sort:SORT.col,desc:SORT.desc})});
  return r.ok ? await r.json() : null;
 }
 async function loadMoreTimeline(){
@@ -2784,7 +3010,7 @@ async function openCtx(id){
  try{
   const [r,j]=await fetchCtx({id},unit,n);
   const bar='<div class="row" style="margin:2px 0 6px"><span class="count">Context</span>'
-    +'<button class="sec" onclick="copyEvent('+id+',this)">&#10697; Copy event</button>'
+    +'<button class="sec" onclick="copyEvent('+id+',this)">&#10697; Copy event JSON</button>'
     +'<button class="sec" onclick="markEvent('+id+')">&#128204; Mark event</button>'
     +'<span id="ctxmk" class="muted"></span></div>';
   out.innerHTML = r.ok ? bar+ctxHtml(j,unit,n) : '<div class="err">'+(j.detail||'error')+'</div>';
@@ -2842,7 +3068,7 @@ async function runSql(){
   if(!j.rows.length){out.innerHTML='<p class="muted">No results.</p>';return}
   let h='<div class="wrap"><table><thead><tr>';
   for(const c of j.columns)h+='<th>'+c+'</th>';h+='</tr></thead><tbody>';
-  for(const row of j.rows){h+='<tr>';for(const v of row)h+='<td title="'+esc(v)+'">'+esc(v)+'</td>';h+='</tr>'}
+  for(const row of j.rows){h+='<tr>';for(const v of row)h+=tdCell(v,'');h+='</tr>'}
   h+='</tbody></table></div>';out.innerHTML=h;
  }catch(e){out.innerHTML='<div class="err">'+e+'</div>';rc.textContent=''}
 }
@@ -2921,15 +3147,14 @@ async function sigmaInit(){
   const j=await (await fetch('/sigma/status')).json();
   const msg=document.getElementById('sg_msg');
   if(!j.available){ msg.innerHTML='<span class="err">pySigma is not installed on the server ('+esc(j.error||'')+'). Install <code>pysigma</code> and reload.</span>'; return; }
-  if(!document.getElementById('sg_path').value) document.getElementById('sg_path').value=j.rules_dir;
-  msg.textContent='Rules in: '+j.rules_dir+' · load a folder or upload .yml to start.';
+  msg.textContent='Enter the folder with your general Sigma rules and click Load.';
  }catch(e){ SIGMA_INIT=false; }
 }
 function sigmaSummary(info){
  const p=info.preview||{};
  let h='<div class="count">'+info.loaded+' rules loaded · <b>'+(p.aplicables||0)+' applicable</b>'
   +(p.correlacion?' ('+p.correlacion+' correlation)':'')
-  +' · '+(p.sin_datos||0)+' no logsource data · '+(p.no_linux||0)+' non-Linux (skipped)'
+  +' · '+(p.sin_datos||0)+' no logsource data · '+(p.no_linux||0)+' non-Windows product (skipped)'
   +((info.errors&&info.errors.length)?' · '+info.errors.length+' with parse error':'')+'</div>';
  const by=p.por_logsource||{};
  const keys=Object.keys(by);
@@ -2973,7 +3198,7 @@ async function sigmaListRules(){
   out.innerHTML=h;
  }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
 }
-/* Carga de reglas en streaming con barra de progreso.
+/* Carga de reglas en streaming con barra de progreso (reutilizable: Sigma y LOL).
    Lee NDJSON: {total} -> {i,total,file,loaded,errors} por fichero -> {done,...} */
 async function streamRuleLoad(url, path, msgId, progId, onDone){
  const msg=document.getElementById(msgId); const prog=progId?document.getElementById(progId):null;
@@ -3044,38 +3269,17 @@ async function sigmaRun(){
   let h='<div class="count">'+j.findings.length+' rules with findings · '+j.total_hits+' events · '
    +j.applied+' rules run of '+j.rules_total+'</div>';
   if(!j.findings.length){ h+='<p class="muted">No findings. (Rules ran but no match.)</p>'; }
-  else h+=sgToggleBar();
-  for(const f of j.findings){
-   const sv=SEVCLASS[f.level]||'sev-info'; const rl=ruleLabel(f);
-   h+='<div class="sgfind"><div class="sghead '+sv+'" onclick="this.parentNode.querySelector(\'.sghits\').classList.toggle(\'hidden\')">'
-     +'<span class="sgsev">'+esc((f.level||'?').toUpperCase())+'</span> '+esc(f.title)
-     +' <span class="muted">· '+esc(f.logsource)+' · ×'+f.count+(f.tags&&f.tags.length?' · '+f.tags.map(esc).join(' '):'')+'</span></div>';
-   h+='<div class="sghits hidden">'+ruleYamlBlock(f)+'<div class="wrap"><table>';
-   if(f.correlation){
-    const nc=f.columns.length;
-    h+='<thead><tr><th class="acts"></th>'+f.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>';
-    for(const row of f.hits){
-     const sid=row[row.length-1];
-     h+='<tr class="hitrow" onclick="sigmaGoto('+sid+')">'+actCell(sid,rl)+row.slice(0,nc).map(v=>'<td>'+esc(v)+'</td>').join('')+'</tr>';
-    }
-   }else{
-    h+='<thead><tr><th class="acts"></th><th>#</th><th>ts</th><th>source</th><th>program</th><th>detail</th><th>what matched</th></tr></thead><tbody>';
-    for(const row of f.hits){
-     h+='<tr class="hitrow" onclick="sigmaGoto('+row[1]+')">'+actCell(row[1],rl)+'<td>'+esc(row[0])+'</td><td>'+esc(row[2])+'</td><td>'+esc(row[3])+'</td><td>'+esc(row[4])+'</td><td title="'+esc(row[5])+'">'+hlKw(row[5],f.keywords)+'</td><td class="sgmatch" title="'+esc(row[7]||'')+'">'+esc(row[7]||'')+'</td></tr>';
-    }
-    if(f.count>f.hits.length) h+='<tr><td colspan="7" class="muted">… '+(f.count-f.hits.length)+' more findings (sample limited to '+f.hits.length+')</td></tr>';
-   }
-   h+='</tbody></table></div></div></div>';
-  }
+  else { h+=sgToggleBar(); h+=fcards(j); }
   out.innerHTML=h;
  }catch(e){ prog.style.display='none'; btn.disabled=false; msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
 }
 let SIGMA_LAST=null;
 function sigmaExportCsv(){
  if(!SIGMA_LAST||!SIGMA_LAST.findings) return;
+ // Cabecera del CSV
  const cols=[
   'rule_title','rule_id','rule_level','rule_tags','rule_logsource',
-  'seq','event_id','ts','source','program','detail','src_file','what_matched','rule_yaml'
+  'seq','event_id','ts','channel','provider','detail','src_file','what_matched','rule_yaml'
  ];
  const rows=[cols];
  for(const f of SIGMA_LAST.findings){
@@ -3086,6 +3290,7 @@ function sigmaExportCsv(){
   const rls=f.logsource||'';
   const ryaml=f.yaml||'';
   if(f.correlation){
+   // regla de correlación: columnas dinámicas — volcamos como JSON en 'detail'
    for(const row of f.hits){
     const sid=row[row.length-1];
     rows.push([rtitle,rid,rlevel,rtags,rls,
@@ -3094,7 +3299,7 @@ function sigmaExportCsv(){
      '','',ryaml]);
    }
   } else {
-   // row = [seq, id, ts, source, program, detail, src_file, what_matched]
+   // regla normal: row = [seq, id, ts, channel, provider, detail, src_file, what_matched]
    for(const row of f.hits){
     rows.push([rtitle,rid,rlevel,rtags,rls,
      ''+row[0],''+row[1],row[2]||'',row[3]||'',row[4]||'',
@@ -3113,144 +3318,248 @@ function hlKw(text, kws){
  for(const k of (kws||[])){ if(!k)continue; try{ const rx=new RegExp('('+k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','ig'); h=h.replace(rx,'<mark>$1</mark>'); }catch(_){}}
  return h;
 }
-function ruleYamlBlock(f){ return f.yaml ? '<details class="ruleyaml"><summary>&#9776; rule content (YAML)</summary><pre class="rawpre">'+esc(f.yaml)+'</pre></details>' : ''; }
-function ruleLabel(f){ return (f.title||'rule')+(f.id?(' ['+f.id+']'):'')+(f.tags&&f.tags.length?(' · '+f.tags.join(' ')):''); }
 function sgExpandAll(){ document.querySelectorAll('#sg_out .sghits').forEach(e=>e.classList.remove('hidden')); }
 function sgCollapseAll(){ document.querySelectorAll('#sg_out .sghits').forEach(e=>e.classList.add('hidden')); }
 function sgToggleBar(){ return '<div class="row" style="margin:4px 0 8px"><button class="sec" onclick="sgExpandAll()">Expand all</button> <button class="sec" onclick="sgCollapseAll()">Collapse all</button></div>'; }
 function sigmaGoto(id){ switchTab('explorer'); openCtx(id); }
 
-/* ================= GTFOBins ================= */
-let GTFO_CATALOG=null;
-async function gtfoStatus(){
- const msg=document.getElementById('gtfo_msg'); if(!msg)return;
- try{
-  const r=await fetch('/gtfobins/status'); const j=await r.json();
-  if(j.loaded) msg.textContent='Catalog: '+j.count+' binaries · '+(j.updated||'');
-  else msg.innerHTML='Catalog not loaded — click «Update catalog (GitHub)».';
- }catch(e){}
+/* ================= LOL tabs ================= */
+const LOL_LABELS={lolbas:'LOLBAS',loldrivers:'LOLDrivers',lolrmm:'LOLRMM',hijacklibs:'HijackLibs',lottunnels:'LOTTunnels'};
+const LOL_IND={lolbas:'binary',loldrivers:'driver',lolrmm:'tool',hijacklibs:'DLL',lottunnels:'tunnel tool'};
+const LOL_BUILT={};
+function buildLolTab(cat){
+ if(LOL_BUILT[cat])return; LOL_BUILT[cat]=true;
+ const lbl=LOL_LABELS[cat];
+ document.getElementById('lol_'+cat).innerHTML=
+  '<div class="help"><p>Load your <b>'+lbl+'</b> Sigma rules (your own folder) and run them. Findings show like the Sigma tab, plus a chart of the top '+LOL_IND[cat]+' by number of events that hit.</p></div>'
+  +'<div class="aicfg"><label class="wide">rules folder on the server<input type="text" id="lol_'+cat+'_path" placeholder="path to your '+lbl+' Sigma rules"></label>'
+  +'<button class="bigbtn" onclick="lolLoad(\''+cat+'\')">Load rules</button></div>'
+  +'<div class="row"><button onclick="lolRun(\''+cat+'\')" id="lol_'+cat+'_runbtn" disabled>Run</button>'
+  +'<progress id="lol_'+cat+'_prog" max="100" value="0" style="display:none;width:180px;vertical-align:middle"></progress>'
+  +'<span id="lol_'+cat+'_msg" class="muted"></span></div>'
+  +'<div id="lol_'+cat+'_chart"></div><div id="lol_'+cat+'_out"></div>';
 }
-async function gtfoRefresh(){
- const msg=document.getElementById('gtfo_msg'); const btn=document.getElementById('gtfo_refreshbtn');
- msg.textContent='updating from GitHub (may take a few seconds)…'; btn.disabled=true;
- try{
-  const r=await fetch('/gtfobins/refresh',{method:'POST'}); const j=await r.json();
-  if(!r.ok){ msg.innerHTML='<span class="err">'+esc(j.detail||'error')+'</span>'; }
-  else { msg.textContent='✓ catalog updated: '+j.count+' binaries · '+(j.updated||''); GTFO_CATALOG=null; }
- }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
- btn.disabled=false;
+async function lolLoad(cat){
+ const path=document.getElementById('lol_'+cat+'_path').value.trim();
+ if(!path){ document.getElementById('lol_'+cat+'_msg').innerHTML='<span class="err">Enter a rules folder.</span>'; return; }
+ await streamRuleLoad('/sigma/load/stream?set='+cat, path, 'lol_'+cat+'_msg', 'lol_'+cat+'_prog', function(j){
+  document.getElementById('lol_'+cat+'_runbtn').disabled=!(j.loaded>0);
+  const pv=j.preview||{};
+  document.getElementById('lol_'+cat+'_msg').textContent=j.loaded+' rules loaded · '+(pv.aplicables||0)+' applicable'+(j.errors&&j.errors.length?' · '+j.errors.length+' file errors':'');
+ });
 }
-function gbFunctions(functions){
- let h='';
- for(const fn of Object.keys(functions)){
-  h+='<div class="gbsec"><div class="gbsech">'+esc(fn)+'</div>';
-  for(const e of functions[fn]){
-   if(e.comment) h+='<div class="gbcomment">'+esc(e.comment)+'</div>';
-   h+='<div class="gbcode">'+esc(e.code)+'</div>';
-   if(e.contexts && e.contexts.length) h+='<div style="margin:2px 0 4px">'+e.contexts.map(c=>'<span class="gbctx">'+esc(c)+'</span>').join('')+'</div>';
+async function lolRun(cat){
+ const msg=document.getElementById('lol_'+cat+'_msg'),out=document.getElementById('lol_'+cat+'_out'),chart=document.getElementById('lol_'+cat+'_chart'),btn=document.getElementById('lol_'+cat+'_runbtn'),prog=document.getElementById('lol_'+cat+'_prog');
+ msg.textContent='running rules…'; if(prog){prog.style.display='';prog.value=0;} btn.disabled=true;
+ let j=null;
+ try{
+  const r=await fetch('/lol/run/stream?cat='+cat,{method:'POST'});
+  if(!r.ok){ let d=''; try{d=(await r.json()).detail;}catch(_){}
+    if(prog)prog.style.display='none'; btn.disabled=false;
+    msg.innerHTML='<span class="err">'+esc(d||('error '+r.status))+'</span>'; return; }
+  const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
+  for(;;){
+   const {value,done:fin}=await reader.read();
+   if(fin)break;
+   buf+=dec.decode(value,{stream:true});
+   let nl;
+   while((nl=buf.indexOf('\n'))>=0){
+    const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1);
+    if(!line)continue;
+    let x; try{x=JSON.parse(line);}catch(_){continue;}
+    if(x.fatal){ if(prog)prog.style.display='none'; btn.disabled=false;
+      msg.innerHTML='<span class="err">'+esc(x.fatal)+'</span>'; return; }
+    if(x.done){ j=x; continue; }
+    if(prog&&x.total>0) prog.value=Math.round(x.i/x.total*100);
+    msg.textContent='running rule '+x.i+'/'+x.total+' · '+x.found+' with findings…';
+   }
   }
-  h+='</div>';
+  if(prog){prog.value=100;prog.style.display='none';} btn.disabled=false;
+  if(!j){ msg.innerHTML='<span class="err">incomplete response</span>'; return; }
+  msg.textContent='';
+  chart.innerHTML=lolChart(j.chart,j.indicator||LOL_IND[cat]);
+  let h='<div class="count">'+j.findings.length+' rules with findings · '+j.total_hits+' events · '+j.applied+' rules run of '+j.rules_total+'</div>';
+  if(!j.findings.length) h+='<p class="muted">No findings.</p>';
+  else h+='<div class="row" style="margin:4px 0 8px"><button class="sec" onclick="lolExpand(\''+cat+'\',1)">Expand all</button> <button class="sec" onclick="lolExpand(\''+cat+'\',0)">Collapse all</button></div>';
+  h+=fcards(j); out.innerHTML=h;
+ }catch(e){ if(prog)prog.style.display='none'; btn.disabled=false; msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+function lolChart(chart,label){
+ if(!chart||!chart.length) return '<p class="muted">No indicator hits.</p>';
+ const max=Math.max.apply(null,chart.map(x=>x.n))||1;
+ let h='<div class="dcard"><h3>Top '+esc(label)+' (events that hit)</h3>';
+ for(const c of chart){ const pct=Math.max(2,Math.round(c.n/max*100));
+  h+='<div class="dbar" style="cursor:default"><span class="dbk">'+esc(c.k)+'</span><span class="dbtrack"><span class="dbfill" style="width:'+pct+'%"></span></span><span class="dbn">'+c.n+'</span></div>'; }
+ return h+'</div>';
+}
+function lolExpand(cat,open){ document.querySelectorAll('#lol_'+cat+'_out .sghits').forEach(e=>e.classList.toggle('hidden',!open)); }
+function ruleYamlBlock(f){ return f.yaml ? '<details class="ruleyaml"><summary>&#9776; rule content (YAML)</summary><pre class="rawpre">'+esc(f.yaml)+'</pre></details>' : ''; }
+function ruleLabel(f){ return (f.title||'rule')+(f.id?(' ['+f.id+']'):'')+(f.tags&&f.tags.length?(' · '+f.tags.join(' ')):''); }
+function fcards(j){
+ let h='';
+ for(const f of j.findings){
+  const sv=SEVCLASS[f.level]||'sev-info'; const rl=ruleLabel(f);
+  h+='<div class="sgfind"><div class="sghead '+sv+'" onclick="this.parentNode.querySelector(\'.sghits\').classList.toggle(\'hidden\')">'
+    +'<span class="sgsev">'+esc((f.level||'?').toUpperCase())+'</span> '+esc(f.title)
+    +' <span class="muted">· '+esc(f.logsource)+' · ×'+f.count+(f.tags&&f.tags.length?' · '+f.tags.map(esc).join(' '):'')+'</span></div>';
+  h+='<div class="sghits hidden">'+ruleYamlBlock(f)+'<div class="wrap"><table>';
+  if(f.correlation){
+   const nc=f.columns.length;
+   h+='<thead><tr><th class="acts"></th>'+f.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>';
+   for(const row of f.hits){ const sid=row[row.length-1];
+    h+='<tr class="hitrow" onclick="sigmaGoto('+sid+')">'+actCell(sid,rl)+row.slice(0,nc).map(v=>'<td>'+esc(v)+'</td>').join('')+'</tr>'; }
+  }else{
+   h+='<thead><tr><th class="acts"></th><th>#</th><th>ts</th><th>channel</th><th>provider</th><th>detail</th><th>what matched</th></tr></thead><tbody>';
+   for(const row of f.hits){
+    h+='<tr class="hitrow" onclick="sigmaGoto('+row[1]+')">'+actCell(row[1],rl)+'<td>'+esc(row[0])+'</td><td>'+esc(row[2])+'</td><td>'+esc(row[3])+'</td><td>'+esc(row[4])+'</td><td title="'+esc(row[5])+'">'+hlKw(row[5],f.keywords)+'</td><td class="sgmatch" title="'+esc(row[7]||'')+'">'+esc(row[7]||'')+'</td></tr>'; }
+   if(f.count>f.hits.length) h+='<tr><td colspan="7" class="muted">… '+(f.count-f.hits.length)+' more (sample limited)</td></tr>';
+  }
+  h+='</tbody></table></div></div></div>';
  }
  return h;
 }
-function gbPrivBadge(p){
- if(!p) return '';
- let b=[];
- if(p.via_sudo) b.push('<span class="gbpriv danger" title="run via sudo">via sudo</span>');
- if(p.via_nssh) b.push('<span class="gbpriv danger" title="executed from the BSD appliance shell (sh_command / shell_command) — privileged context">appliance shell</span>');
- if(p.escalation) b.push('<span class="gbpriv danger" title="euid=0 with a non-root login user (auid '+esc((p.login_users||[]).join(','))+')">&#9888; escalation</span>');
- else if(p.as_root) b.push('<span class="gbpriv danger" title="run with euid/uid=0">as root</span>');
- if(!b.length) b.push('<span class="gbpriv" title="no elevated privileges">normal user</span>');
- return b.join(' ');
-}
-function gtfoBar(){ return '<div class="row" style="margin:4px 0 8px"><button class="sec" onclick="gtfoExpandAll()">Expand all</button> <button class="sec" onclick="gtfoCollapseAll()">Collapse all</button></div>'; }
-function gtfoExpandAll(){ document.querySelectorAll('#gtfo_out .gbbody').forEach(e=>e.classList.remove('hidden')); }
-function gtfoCollapseAll(){ document.querySelectorAll('#gtfo_out .gbbody').forEach(e=>e.classList.add('hidden')); }
-async function gtfoAllHits(ev, binname){
- ev.stopPropagation();
- const btn=ev.target; const tb=btn.closest('.gbbody').querySelector('.gbsampb');
- if(!tb) return;
- btn.disabled=true; btn.textContent='loading…';
+/* ================= Lookalike (Levenshtein) ================= */
+async function lkRun(){
+ const msg=document.getElementById('lk_msg'),out=document.getElementById('lk_out');
+ const dist=document.getElementById('lk_dist').value, seen=document.getElementById('lk_seen').checked?1:0;
+ msg.textContent='searching…';
  try{
-  const r=await fetch('/gtfobins/samples?bin='+encodeURIComponent(binname));
-  const j=await r.json();
-  if(!r.ok){ btn.textContent='error'; return; }
-  let h='';
-  for(const s of j.samples){
-   h+='<tr class="hitrow" onclick="sigmaGoto('+s.id+')">'+actCell(s.id)+'<td>'+esc(s.id)+'</td><td>'+esc(s.ts)+'</td><td>'+esc(s.source)+'</td><td>'+esc(s.user)+'</td><td>'+esc(s.detalle)+'</td></tr>';
-  }
-  tb.innerHTML=h;
-  const hdr=btn.closest('.gbsamph'); const tr=hdr.querySelector('.gbtrunc');
-  if(tr) tr.textContent='— showing all '+j.samples.length;
-  btn.remove();
- }catch(e){ btn.textContent='error'; btn.disabled=false; }
-}
-async function gtfoCheck(){
- const msg=document.getElementById('gtfo_msg'); const out=document.getElementById('gtfo_out');
- const btn=document.getElementById('gtfo_checkbtn');
- msg.textContent='checking executed binaries…'; btn.disabled=true;
- try{
-  const r=await fetch('/gtfobins/check',{method:'POST'}); const j=await r.json();
-  if(!r.ok){ msg.innerHTML='<span class="err">'+esc(j.detail||'error')+'</span>'; btn.disabled=false; return; }
+  const r=await fetch('/lookalike?dist='+dist+'&also_seen='+seen); const j=await r.json();
+  if(!r.ok){ msg.innerHTML='<span class="err">'+esc(j.detail||'error')+'</span>'; return; }
   msg.textContent='';
-  if(!j.matched.length){ out.innerHTML='<p class="muted">No binary from the GTFOBins catalog ('+j.catalog+') appears executed among the '+j.checked+' distinct binaries seen in the logs.</p>'; btn.disabled=false; return; }
-  let h='<div class="count">'+j.matched.length+' GTFOBins binaries executed · of '+j.checked+' distinct binaries seen · catalog: '+j.catalog+'</div>';
-  h+='<div class="muted" style="margin:2px 0 6px">In red, privileged executions (via <code>sudo</code> or as root) — the truly dangerous ones. The real SUID bit is not observable from logs alone.</div>'+gtfoBar();
-  for(const b of j.matched){
-   const fnames=Object.keys(b.functions);
-   h+='<div class="gbin'+(b.danger?' danger':'')+'"><div class="gbhead" onclick="this.parentNode.querySelector(\'.gbbody\').classList.toggle(\'hidden\')">'
-     +'<span class="gbname">'+esc(b.bin)+'</span><span class="gbcount">×'+b.count+' executions</span> '+gbPrivBadge(b.privilege)
-     +'<span class="gbfns">'+fnames.map(f=>'<span class="gbfn">'+esc(f)+'</span>').join('')+'</span></div>';
-   h+='<div class="gbbody hidden">'+gbFunctions(b.functions);
-   if(b.samples && b.samples.length){
-    const _bq=b.bin.replace(/'/g,"\\'");
-    h+='<div class="gbsamph">Where it ran (click to see its context)'
-      +(b.count>b.samples.length?' <span class="gbtrunc">— showing '+b.samples.length+' of '+b.count+'</span> <button class="xs" onclick="gtfoAllHits(event,\''+esc(_bq)+'\')">See all '+b.count+'</button>':'')
-      +'</div><div class="wrap"><table>'
-      +'<thead><tr><th class="acts"></th><th>#</th><th>ts</th><th>source</th><th>user</th><th>detail</th></tr></thead><tbody class="gbsampb">';
-    for(const s of b.samples){
-     h+='<tr class="hitrow" onclick="sigmaGoto('+s.id+')">'+actCell(s.id)+'<td>'+esc(s.id)+'</td><td>'+esc(s.ts)+'</td><td>'+esc(s.source)+'</td><td>'+esc(s.user)+'</td><td>'+esc(s.detalle)+'</td></tr>';
-    }
-    h+='</tbody></table></div>';
-   }
-   h+='</div></div>';
+  if(!j.matches.length){ out.innerHTML='<p class="muted">No lookalike binaries within distance '+esc(dist)+' (checked against '+j.refs+' reference binaries).</p>'; return; }
+  let h='<div class="count">'+j.matches.length+' lookalike candidate(s) · distance ≤ '+esc(dist)+' · '+j.refs+' reference binaries</div>';
+  h+='<div class="wrap"><table><thead><tr><th class="acts"></th><th>suspicious binary</th><th>events</th><th>looks like</th><th>distance</th><th>source</th></tr></thead><tbody>';
+  for(const m of j.matches){
+   const act=(m.id!=null)?actCell(m.id,'Lookalike '+m.name+' ~ '+m.ref):'<td class="acts"></td>';
+   h+='<tr class="hitrow" data-n="'+esc(m.name)+'" onclick="goExplore(this.dataset.n)">'+act+'<td class="sgmatch">'+esc(m.name)+'</td><td>'+m.count+'</td><td>'+esc(m.ref)+'</td><td>'+m.dist+'</td><td class="muted">'+(m.kind==='seen'?'seen vs seen':'reference')+'</td></tr>'; }
+  h+='</tbody></table></div>'; out.innerHTML=h;
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+
+/* ================= Phase 2: advanced views ================= */
+function base(s){ return (s||'').split(/[\\\/]/).pop(); }
+let PT_HL={};
+function ptHit(n){ return (PT_HL.guid&&n.guid===PT_HL.guid)
+  ||(PT_HL.pid&&String(n.pid)===String(PT_HL.pid))
+  ||(PT_HL.img&&(n.image||'').toLowerCase().indexOf(PT_HL.img.toLowerCase())>=0); }
+async function loadProctree(anchorGuid){
+ const out=document.getElementById('pt_out'), msg=document.getElementById('pt_msg');
+ const an=document.getElementById('pt_anchors');
+ const pid=document.getElementById('pt_pid').value.trim();
+ const img=document.getElementById('pt_img').value.trim();
+ let guid=document.getElementById('pt_guid').value.trim();
+ if(anchorGuid){ guid=anchorGuid; document.getElementById('pt_guid').value=anchorGuid; }
+ const qs=new URLSearchParams();
+ if(guid) qs.set('guid',guid);
+ else if(pid) qs.set('pid',pid);
+ else if(img) qs.set('image',img);
+ if(!Array.from(qs.keys()).length){
+  an.innerHTML=''; out.innerHTML='<p class="muted">Enter a <b>PID</b>, <b>ProcessGuid</b> or <b>image name</b> above, then &laquo;Build tree&raquo;.</p>'; return; }
+ PT_HL={guid:guid||'', pid:guid?'':pid, img:guid?'':img};
+ msg.textContent='loading…';
+ try{ const j=await (await fetch('/proctree?'+qs.toString())).json(); msg.textContent='';
+  // anchor picker when a PID/image matches several distinct processes
+  if(!guid && j.anchors && j.anchors.length>1){
+   an.innerHTML='<div class="count">'+j.anchors.length+' processes match — «pin» one for just its tree, or scroll down for the combined view:</div>'
+     +'<div class="wrap"><table><thead><tr><th>ts</th><th>image</th><th>pid</th><th>user</th><th>host</th><th></th></tr></thead><tbody>'
+     +j.anchors.map(a=>'<tr class="hitrow"><td>'+esc(a.ts)+'</td><td>'+esc(base(a.image))+' <span class="ptsrc">'+(a.eid===1?'sysmon':a.eid)+'</span></td><td>'+esc(a.pid)+'</td><td>'+esc(a.user)+'</td><td>'+esc(a.host)+'</td>'
+        +'<td><button class="sec" onclick="pinProc('+a.id+')">pin this</button></td></tr>').join('')
+     +'</tbody></table></div>';
+  } else { an.innerHTML=''; }
+  if(!j.roots.length){ out.innerHTML='<p class="muted">No process matches that anchor (Sysmon EID1 or Security 4688).</p>'; return; }
+  out.innerHTML='<div class="ptree">'+j.roots.map(ptNode).join('')+'</div>';
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+async function pinProc(id){
+ const out=document.getElementById('pt_out'), msg=document.getElementById('pt_msg'), an=document.getElementById('pt_anchors');
+ msg.textContent='loading…';
+ try{ const j=await (await fetch('/proctree?node='+encodeURIComponent(id))).json(); msg.textContent='';
+  an.innerHTML='<div class="count">Pinned process #'+esc(id)+' — <a href="#" onclick="loadProctree();return false">back to all matches</a></div>';
+  if(!j.roots.length){ out.innerHTML='<p class="muted">That process has no tree.</p>'; return; }
+  out.innerHTML='<div class="ptree">'+j.roots.map(ptNode).join('')+'</div>';
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+function ptNode(n){
+ const kids=n.children&&n.children.length;
+ const hl=ptHit(n)?' pthit':'';
+ const src=n.eid===1?'sysmon':(n.eid===4688?'4688':(n.eid||''));
+ const head='<span class="ptrow'+hl+'">'+actInline(n.id)+'<span class="ptbin'+hl+'" onclick="event.stopPropagation();sigmaGoto('+n.id+')" title="go to context">'+esc(base(n.image)||'?')+'</span>'
+   +(src?'<span class="ptsrc">'+esc(src)+'</span>':'')
+   +'<span class="ptpid">pid '+esc(n.pid||'?')+'</span>'
+   +'<span class="ptcmd">'+esc((n.cmd||'').slice(0,160))+'</span>'
+   +'<span class="muted ptmeta">'+esc(n.user||'')+(n.ts?' · '+esc(n.ts):'')+'</span></span>';
+ if(kids) return '<details open class="ptnode"><summary>'+head+' <span class="muted">('+kids+')</span></summary>'+n.children.map(ptNode).join('')+'</details>';
+ return '<div class="ptleaf">'+head+'</div>';
+}
+function ptAll(open){ document.querySelectorAll('#pt_out details').forEach(d=>d.open=!!open); }
+function clearLogons(){ for(const id of ['lo_user','lo_type','lo_src','lo_ws','lo_auth','lo_host']) document.getElementById(id).value=''; loadLogons(); }
+async function loadLogons(){
+ const out=document.getElementById('lo_out'), msg=document.getElementById('lo_msg');
+ const qs=new URLSearchParams();
+ const map={user:'lo_user',logon_type:'lo_type',src_ip:'lo_src',workstation:'lo_ws',auth:'lo_auth',host:'lo_host'};
+ for(const k in map){ const v=document.getElementById(map[k]).value.trim(); if(v) qs.set(k,v); }
+ const filtered=Array.from(qs.keys()).length>0;
+ msg.textContent='loading…';
+ try{ const j=await (await fetch('/logons'+(filtered?'?'+qs.toString():''))).json(); msg.textContent='';
+  if(!j.logons.length){ out.innerHTML='<p class="muted">No logon/auth events match'+(filtered?' those filters.':' (Security 4624/4625/Kerberos/NTLM/RDP).')+'</p>'; return; }
+  let h='<div class="count">'+j.logons.length+' logon/auth events'+(filtered?' (filtered)':'')+'</div><div class="wrap"><table><thead><tr><th class="acts"></th><th>ts</th><th>eid</th><th>action</th><th>user</th><th>type</th><th>source IP</th><th>workstation</th><th>auth</th><th>host</th></tr></thead><tbody>';
+  for(const l of j.logons){ h+='<tr class="hitrow'+(l.failed?' failrow':'')+'" onclick="sigmaGoto('+l.id+')">'+actCell(l.id)+'<td>'+esc(l.ts)+'</td><td>'+esc(l.eid)+'</td><td>'+esc(l.action)+'</td><td>'+esc(l.user)+'</td><td>'+esc(l.logon_type)+'</td><td>'+esc(l.src_ip)+'</td><td>'+esc(l.workstation)+'</td><td>'+esc(l.auth_pkg)+'</td><td>'+esc(l.host)+'</td></tr>'; }
+  out.innerHTML=h+'</tbody></table></div>';
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+let PERSIST_ITEMS=[];
+async function loadPersist(){
+ const out=document.getElementById('pe_out'), msg=document.getElementById('pe_msg');
+ msg.textContent='loading…';
+ try{ const j=await (await fetch('/persistence')).json(); msg.textContent='';
+  PERSIST_ITEMS=j.items||[]; renderPersist();
+ }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
+}
+function renderPersist(){
+ const out=document.getElementById('pe_out');
+ const fEl=document.getElementById('pe_filter'); const f=(fEl?fEl.value.trim().toLowerCase():'');
+ let items=PERSIST_ITEMS;
+ if(f) items=items.filter(i=>((i.ptype||'')+' '+(i.detail||'')+' '+(i.actor||'')+' '+(i.user||'')+' '+(i.eid||'')).toLowerCase().indexOf(f)>=0);
+ if(!PERSIST_ITEMS.length){ out.innerHTML='<p class="muted">No persistence signals found.</p>'; return; }
+ if(!items.length){ out.innerHTML='<p class="muted">No persistence signals match that filter.</p>'; return; }
+ let h='<div class="count">'+items.length+' persistence signal(s)'+(f?' (filtered of '+PERSIST_ITEMS.length+')':'')+'</div><div class="wrap"><table><thead><tr><th class="acts"></th><th>ts</th><th>type</th><th>eid</th><th>detail</th><th>actor</th><th>user</th><th>host</th></tr></thead><tbody>';
+ for(const i of items){ h+='<tr class="hitrow" onclick="sigmaGoto('+i.id+')">'+actCell(i.id)+'<td>'+esc(i.ts)+'</td><td><b>'+esc(i.ptype)+'</b></td><td>'+esc(i.eid)+'</td><td class="sgmatch">'+esc(i.detail)+'</td><td>'+esc(base(i.actor))+'</td><td>'+esc(i.user)+'</td><td>'+esc(i.host)+'</td></tr>'; }
+ out.innerHTML=h+'</tbody></table></div>';
+}
+/* resalta las apariciones (literal, case-insensitive) de q en el texto, escapando HTML */
+function hlMark(text,q){
+ const t=String(text||''); if(!q) return esc(t);
+ const lt=t.toLowerCase(), lq=q.toLowerCase(); let i=0,pos,h='';
+ while((pos=lt.indexOf(lq,i))>=0){ h+=esc(t.slice(i,pos))+'<mark>'+esc(t.slice(pos,pos+lq.length))+'</mark>'; i=pos+lq.length; }
+ return h+esc(t.slice(i));
+}
+/* fragmento alrededor de la 1ª aparición de q, con la coincidencia resaltada */
+function psSnippet(text,q){
+ const t=String(text||''); const lt=t.toLowerCase(), lq=q.toLowerCase();
+ const pos=lt.indexOf(lq); if(pos<0) return esc(t.slice(0,160))+(t.length>160?'…':'');
+ const a=Math.max(0,pos-60), b=Math.min(t.length,pos+lq.length+90);
+ return (a>0?'…':'')+esc(t.slice(a,pos))+'<mark>'+esc(t.slice(pos,pos+lq.length))+'</mark>'+esc(t.slice(pos+lq.length,b))+(b<t.length?'…':'');
+}
+async function loadPS(){
+ const out=document.getElementById('ps_out'), msg=document.getElementById('ps_msg');
+ const q=(document.getElementById('ps_q').value||'').trim();
+ msg.textContent='loading…';
+ try{
+  const j=await (await fetch('/powershell'+(q?('?q='+encodeURIComponent(q)):''))).json();
+  msg.textContent='';
+  if(!j.scripts.length){ out.innerHTML='<p class="muted">'+(q?('No script blocks contain “'+esc(q)+'”.'):'No PowerShell 4104 script blocks (script-block logging not present in this data).')+'</p>'; return; }
+  let h='<div class="count">'+j.scripts.length+' script block(s)'+(q?(' matching “'+esc(q)+'”'):'')+'</div>';
+  for(const s of j.scripts){
+   const txt=s.text||'';
+   const prev = q ? psSnippet(txt,q) : (esc(txt.slice(0,160))+(txt.length>160?'…':''));
+   h+='<div class="sgfind"><div class="sghead sev-info" onclick="this.parentNode.querySelector(\'.sghits\').classList.toggle(\'hidden\')">'
+     +actInline(s.id)+'<span class="muted">'+esc(s.ts||'')+' · '+esc(s.host||'')+' · '+esc(s.user||'')+' · '+esc(base(s.path)||'script')+(s.parts>1?' · '+s.parts+' parts':'')+'</span>'
+     +'<div class="psprev">'+prev+'</div></div>'
+     +'<div class="sghits'+(q?'':' hidden')+'"><pre class="sgsql" title="click to open event context" onclick="sigmaGoto('+s.id+')">'+hlMark(txt,q)+'</pre></div></div>';
   }
   out.innerHTML=h;
  }catch(e){ msg.innerHTML='<span class="err">'+esc(e)+'</span>'; }
- btn.disabled=false;
-}
-async function gtfoToggleList(){
- const box=document.getElementById('gtfo_list');
- if(!box.classList.contains('hidden')){ box.classList.add('hidden'); return; }
- box.classList.remove('hidden');
- if(!GTFO_CATALOG){
-  box.innerHTML='<p class="muted">loading catalog…</p>';
-  try{ const r=await fetch('/gtfobins/list'); const j=await r.json();
-   if(!r.ok){ box.innerHTML='<span class="err">'+esc(j.detail||'error')+'</span>'; return; }
-   GTFO_CATALOG=j;
-  }catch(e){ box.innerHTML='<span class="err">'+esc(e)+'</span>'; return; }
- }
- gtfoRenderList();
-}
-function gtfoRenderList(){
- const box=document.getElementById('gtfo_list'); const d=GTFO_CATALOG;
- const names=Object.keys(d.binaries).sort();
- let h='<div class="row" style="margin-top:10px"><input type="text" id="gtfo_filter" placeholder="filter binary…" oninput="gtfoFilterList()" style="min-width:220px"> <span class="muted">'+d.count+' binaries · '+esc(d.updated||'')+' · click one to see how it is abused</span></div>';
- h+='<div id="gtfo_detail"></div>';
- h+='<div class="gblist" id="gtfo_chips">'+names.map(n=>'<span class="gbchip" data-n="'+esc(n)+'" onclick="gtfoShowBin(this.dataset.n)">'+esc(n)+'<span class="n">'+Object.keys(d.binaries[n].functions).length+'</span></span>').join('')+'</div>';
- box.innerHTML=h;
-}
-function gtfoFilterList(){
- const q=(document.getElementById('gtfo_filter').value||'').toLowerCase();
- document.querySelectorAll('#gtfo_chips .gbchip').forEach(c=>{ c.style.display=c.dataset.n.toLowerCase().includes(q)?'':'none'; });
-}
-function gtfoShowBin(n){
- const d=GTFO_CATALOG; if(!d)return; const b=d.binaries[n]; if(!b)return;
- const det=document.getElementById('gtfo_detail');
- det.innerHTML='<div class="gbin"><div class="gbhead"><span class="gbname">'+esc(n)+'</span>'
-   +'<span class="gbfns">'+Object.keys(b.functions).map(f=>'<span class="gbfn">'+esc(f)+'</span>').join('')+'</span></div>'
-   +'<div class="gbbody">'+gbFunctions(b.functions)+'</div></div>';
- det.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
 /* ================= Resumen / Dashboard ================= */
@@ -3299,24 +3608,28 @@ async function loadDash(){
   const rango=(j.ts_min&&j.ts_max)?(j.ts_min+' → '+j.ts_max):'no timestamps';
   let h='<div id="ip_detail"></div><div class="dgrid">'
    +'<div class="dtile"><div class="v">'+j.total+'</div><div class="l">events</div></div>'
-   +'<div class="dtile"><div class="v">'+(d.source||0)+'</div><div class="l">sources</div></div>'
-   +'<div class="dtile"><div class="v">'+(d.ip||0)+'</div><div class="l">distinct IPs</div></div>'
+   +'<div class="dtile"><div class="v">'+(d.source||0)+'</div><div class="l">channels</div></div>'
+   +'<div class="dtile"><div class="v">'+(d.host||0)+'</div><div class="l">hosts</div></div>'
    +'<div class="dtile"><div class="v">'+(d.user||0)+'</div><div class="l">users</div></div>'
-   +'<div class="dtile" style="flex:2;min-width:260px"><div class="l">time range (UTC)</div><div class="sub">'+esc(rango)+'</div></div>'
+   +'<div class="dtile"><div class="v">'+(d.ip||0)+'</div><div class="l">distinct IPs</div></div>'
+   +'<div class="dtile" style="flex:2;min-width:240px"><div class="l">time range (UTC)</div><div class="sub">'+esc(rango)+'</div></div>'
    +'</div>';
   h+=dHist(j.hist);
   h+='<div class="dcols">'
-   +'<div class="dcard"><h3>Top source IPs</h3>'+dBars(j.top_ip,'ip')+'</div>'
-   +'<div class="dcard"><h3>Top users</h3>'+dBars(j.top_user)+'</div></div>';
+   +'<div class="dcard"><h3>Top EventIDs</h3>'+dBars(j.top_eid)+'</div>'
+   +'<div class="dcard"><h3>Top images</h3>'+dBars(j.top_image)+'</div></div>';
+  h+='<div class="dcols">'
+   +'<div class="dcard"><h3>Top users</h3>'+dBars(j.top_user)+'</div>'
+   +'<div class="dcard"><h3>Top hosts</h3>'+dBars(j.top_host)+'</div></div>';
+  h+='<div class="dcols">'
+   +'<div class="dcard"><h3>Top destination IPs</h3>'+dBars(j.top_dst_ip,'ip')+'</div>'
+   +'<div class="dcard"><h3>Top source IPs</h3>'+dBars(j.top_src_ip,'ip')+'</div></div>';
   h+='<div class="dcols">'
    +'<div class="dcard"><h3>Top ISP / operator</h3>'+dBars(j.top_isp,null,false)+'</div>'
    +'<div class="dcard"><h3>Top countries</h3>'+dBars(j.top_country,null,false)+'</div></div>';
   h+='<div class="dcols">'
-   +'<div class="dcard"><h3>Top binaries (exe)</h3>'+dBars(j.top_bin)+'</div>'
-   +'<div class="dcard"><h3>Top programs</h3>'+dBars(j.top_program)+'</div></div>';
-  h+='<div class="dcols">'
-   +'<div class="dcard"><h3>Events by source</h3>'+dBars(j.by_source)+'</div>'
-   +'<div class="dcard"><h3>Severity</h3>'+dBars(j.severity)+'</div></div>';
+   +'<div class="dcard"><h3>Events by channel</h3>'+dBars(j.by_source)+'</div>'
+   +'<div class="dcard"><h3>Logon types</h3>'+dBars(j.top_logon)+'</div></div>';
   out.innerHTML=h;
   // estado geoip en el mensaje
   const g=j.geoip||{};
@@ -3450,6 +3763,6 @@ async function loadMarks(){
 }
 
 loadAiCfg('ai');loadAiCfg('local');
-buildColsPanel();applyCols();fillEx();init();gtfoStatus();
+buildColsPanel();applyCols();fillEx();init();
 </script>
 </body></html>"""
