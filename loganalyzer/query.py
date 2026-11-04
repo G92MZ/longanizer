@@ -6,7 +6,7 @@ Sintaxis (estilo KQL/Lucene, sin mayúsculas en nombres ni valores):
   "frase con espacios"    texto libre literal (también protege AND/OR/NOT)
   campo:valor             campo coincide con valor   (':' y '=' son lo mismo)
   campo = valor           se admiten espacios alrededor del operador
-  campo==valor            exacto (también en campos de texto)
+  campo==valor            exacto y literal (sin comodines ni listas), también en texto
   campo!=valor            NO coincide (igual que -campo:valor)
   campo>N  >=  <  <=      comparación (números y fechas: ts>=2026-10-01)
   campo:a,b,c             lista (cualquiera de los valores)
@@ -335,8 +335,10 @@ class Compiler:
                 return f"{expr} {op} CAST(? AS TIMESTAMP)", [val.replace("T", " ").rstrip("Z")]
             return f"lower({sval}) {op} lower(?)", [val]
 
-        exact = op == "==" or kind in ("num", "code")
-        vals = [v.strip() for v in val.split(",")] if kind in ("num", "code") else [val]
+        literal = op == "=="                 # '==' = valor literal: sin comodines ni listas
+        exact = literal or kind in ("num", "code")
+        vals = ([v.strip() for v in val.split(",")]
+                if kind in ("num", "code") and not literal else [val])
         vals = [v for v in vals if v != ""] or [val]
 
         if kind == "num":
@@ -354,7 +356,7 @@ class Compiler:
                     frags.append(f"{expr} IN ({', '.join('?' * len(ints))})")
                 params.extend(int(v) for v in ints)
             for v in bad:
-                if "*" in v or "?" in v:
+                if ("*" in v or "?" in v) and not literal:
                     frags.append(f"{sval} ILIKE ? ESCAPE '\\'")
                     params.append(_glob_to_like(v))
                 else:
@@ -367,7 +369,7 @@ class Compiler:
 
         frags, params = [], []
         for v in vals:
-            if "*" in v or "?" in v:
+            if ("*" in v or "?" in v) and not literal:
                 frags.append(f"{sval} ILIKE ? ESCAPE '\\'")
                 params.append(_glob_to_like(v))
             elif exact:
