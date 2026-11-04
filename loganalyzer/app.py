@@ -1334,8 +1334,12 @@ INDEX_HTML = r"""<!doctype html>
  .qhelpbody table{border-collapse:collapse}
  .qhelpbody td{padding:3px 10px 3px 0;vertical-align:top;color:var(--muted)}
  .qhelpbody td:first-child{white-space:nowrap}
+ .qhelpbody table{margin-top:0;width:auto;font-family:inherit;font-size:12.5px}
+ .qhelpbody td{border:0;border-bottom:1px solid rgba(127,127,127,.15);white-space:normal;max-width:none;overflow:visible;padding:5px 14px 5px 0;line-height:1.45}
+ .qhelpbody td:first-child{white-space:nowrap;vertical-align:top}
  .qhelpbody code{background:rgba(127,127,127,.16);padding:1px 5px;border-radius:4px;color:var(--fg)}
  .qhelpbody p{margin:8px 0 0}
+ .qwarn{margin:6px 0;padding:6px 10px;border:1px solid #8a6d1f;border-radius:8px;background:rgba(210,153,34,.12);color:#e3b341;font-size:12px}
  .faccount{font-size:11px;color:var(--muted);margin:6px 0 4px}
  .facwrap{display:flex;flex-direction:column;gap:3px;max-width:640px;max-height:230px;overflow-y:auto;padding-right:4px}
  .facclose{margin-left:6px}
@@ -1509,8 +1513,8 @@ INDEX_HTML = r"""<!doctype html>
     <div class="tbglabel">Search</div>
     <div class="tbrow">
      <div class="fld grow qacwrap">
-      <label for="q">Text, IOC, IP or hash <span class="hintlbl">· words = AND · <code>field:value</code> · <code>-exclude</code></span></label>
-      <input type="text" id="q" placeholder="root  src_ip:192  -user:cron" autofocus autocomplete="off">
+      <label for="q">Text, IOC, IP or hash <span class="hintlbl">· <code>field:value</code> · <code>AND</code> <code>OR</code> <code>NOT</code> <code>( )</code> · see «How to filter» below</span></label>
+      <input type="text" id="q" placeholder="Failed  status:404  user:root  NOT program:cron" autofocus autocomplete="off">
       <div id="qac" class="qac hidden"></div>
      </div>
      <div class="fld">
@@ -1524,22 +1528,25 @@ INDEX_HTML = r"""<!doctype html>
      <button class="bigbtn" onclick="doSearch()">Search</button>
     </div>
     <details class="qhelp">
-     <summary>How to filter &mdash; field search, exact match &amp; exclude (NOT)</summary>
+     <summary>How to filter &mdash; fields, AND / OR / NOT, exact match, wildcards</summary>
      <div class="qhelpbody">
       <table>
-       <tr><td><code>root ssh</code></td><td>free text; several words = <b>AND</b> (all must appear)</td></tr>
-       <tr><td><code>src_ip:192</code></td><td>field <b>contains</b> (case-insensitive). Also <code>user:root</code>, <code>exe:wget</code>, <code>message:passwd</code></td></tr>
-       <tr><td><code>src_ip&nbsp;contains&nbsp;192</code></td><td>same thing, written with the word <code>contains</code></td></tr>
-       <tr><td><code>status=404</code></td><td>field <b>exactly</b> equals (<code>=</code>). <code>user=root</code> matches only «root», not «root2»</td></tr>
-       <tr><td><code>user!=root</code></td><td>field is <b>not</b> that value</td></tr>
-       <tr><td><code>-cron</code> &nbsp; <code>-user:root</code></td><td><b>exclude</b> (NOT): drop events with that text / field value. Several allowed</td></tr>
-       <tr><td><code>x:syscall:execve</code></td><td>a key of the <code>extra</code> JSON (auditd/logfmt). Also <code>extra.syscall:execve</code></td></tr>
-       <tr><td><code>/regex/</code></td><td>regex over the raw line, e.g. <code>/failed|invalid/</code>. Combine with fields &amp; NOT</td></tr>
-       <tr><td><code>exe:/wget|curl/</code></td><td>regex on a single field. Quote if it has spaces: <code>"message:/a b/"</code></td></tr>
-       <tr><td><code>user:*</code></td><td>the field <b>exists</b> / has a value. <code>-user:*</code> (or <code>user:-</code>) = <b>empty or missing</b></td></tr>
-       <tr><td><code>user:"john doe"</code></td><td>use quotes for values with spaces</td></tr>
+       <tr><td><code>Failed password</code></td><td>free text; several words = <b>AND</b> (all must appear)</td></tr>
+       <tr><td><code>"Failed password"</code></td><td>exact phrase (quotes). Quotes also let you search the words and / or / not</td></tr>
+       <tr><td><code>status:404 &nbsp; status=404 &nbsp; Status = 404</code></td><td><b><code>:</code> and <code>=</code> are the same</b>; spaces around them are fine. Number fields (status, pid, src_port, bytes, line_no) match <b>exactly</b>, so <code>status:40</code> never matches 404</td></tr>
+       <tr><td><code>user:root &nbsp; exe:wget</code></td><td>text fields match when they <b>contain</b> the value (case-insensitive)</td></tr>
+       <tr><td><code>user==root &nbsp; path==/admin</code></td><td><code>==</code> = <b>exact</b> match, also on text fields (<code>user==root</code> skips root2)</td></tr>
+       <tr><td><code>user_agent:*curl* &nbsp; status:4*</code></td><td>wildcards <code>*</code> <code>?</code> over the whole value</td></tr>
+       <tr><td><code>status:404,500</code></td><td>any of several values (commas)</td></tr>
+       <tr><td><code>status&gt;=500 &nbsp; ts&gt;=2026-10-01</code></td><td>compare numbers and dates with <code>&gt; &gt;= &lt; &lt;=</code>. <code>ts:2026-10-01</code> = that whole day</td></tr>
+       <tr><td><code>src_ip=1.2.3.4 OR src_ip=5.6.7.8</code></td><td><b>AND</b> (default), <b>OR</b>, <b>NOT</b> and <b>( )</b>: <code>(Failed OR Accepted) user:root</code></td></tr>
+       <tr><td><code>NOT user:root &nbsp; -user:root &nbsp; user!=root</code></td><td><b>exclude</b> — three equivalent forms; <code>-word</code> works on free text too</td></tr>
+       <tr><td><code>comm:wget &nbsp; x:comm:wget</code></td><td>keys of the <code>extra</code> JSON (auditd/logfmt) work by name; <code>x:</code> forces an extra key (exact case)</td></tr>
+       <tr><td><code>/failed|invalid/ &nbsp; exe:/wget|curl/</code></td><td>regex over the raw line, or on one field</td></tr>
+       <tr><td><code>user:* &nbsp; user:-</code></td><td>the field <b>has a value</b> / is <b>empty or missing</b></td></tr>
+       <tr><td><code>user:"john doe"</code></td><td>quotes for values with spaces</td></tr>
       </table>
-      <p class="hintlbl">Mix freely: <code>ssh_failed src_ip:192 -user:root /enc\s+\w+/</code>. Fields: ts, source, host, program, user, src_ip, src_port, exe, method, path, status, event, message (aliases: ip, prog, msg…). The <b>regex</b> checkbox treats the WHOLE box as one regex; the <code>/…/</code> form above works token-by-token without it.</p>
+      <p class="hintlbl">Example: <code>status:404 src_ip:203.0.113.55</code>. Field names ignore case and <code>_</code>, and common names work: <code>ip</code>/<code>client_ip</code> → src_ip, <code>ua</code>/<code>UserAgent</code> → user_agent, <code>url</code>/<code>uri</code> → path, <code>code</code> → status, <code>level</code> → severity, <code>prog</code>/<code>process</code> → program. Fields: ts, source, host, program, pid, severity, user, src_ip, src_port, exe, method, path, status, bytes, referer, user_agent, event, message, src_file, line_no. An unknown field shows a ⚠ warning and is searched as plain text. The <b>regex</b> checkbox treats the WHOLE box as one regex.</p>
      </div>
     </details>
     <details class="qhelp savedbox" ontoggle="if(this.open)renderSaved()">
@@ -1849,9 +1856,9 @@ LIMIT 50;</textarea>
    <ul>
     <li>Type any text: an IOC, an IP, a hash, a path, a piece of a command. Searches the message, the raw line, <code>exe</code>, path, user and IP. Case-insensitive.</li>
     <li><b>Multiple words = AND</b> (all must appear in the same event). E.g. <code>suid bash</code>.</li>
-    <li><b>Filter by a field's content</b> with <code>field:value</code> (contains), e.g. <code>src_ip:192</code>, <code>user:root</code>, <code>exe:wget</code>. The word form <code>src_ip contains 192</code> works too. <code>field=value</code> is an <b>exact</b> match (<code>status=404</code>), <code>field!=value</code> is <b>not equal</b>.</li>
+    <li><b>Query language</b> (Explorer search box; same in WinHound): <code>field:value</code> and <code>field=value</code> are <b>the same</b> and spaces around them are fine (<code>status = 404</code>). Number fields (<code>status</code>, <code>pid</code>, <code>src_port</code>, <code>bytes</code>) match <b>exactly</b>; text fields match when they <b>contain</b> the value. <code>==</code> forces an exact match on text (<code>user==root</code>); wildcards <code>*</code>/<code>?</code> match the whole value (<code>user_agent:*curl*</code>); lists <code>status:404,500</code>; comparisons <code>status&gt;=500</code>, <code>ts&gt;=2026-10-01</code>, and <code>ts:2026-10-01</code> for a whole day. Combine with <b>AND</b> (default, words separated by spaces), <b>OR</b>, <b>NOT</b> and <b>( )</b>: <code>(Failed OR Accepted) user:root NOT src_ip:10.</code>. Exclude also with <code>-term</code> or <code>field!=value</code>. Quotes give a literal phrase (<code>"Failed password"</code>). Regex per term: <code>/regex/</code> over the raw line, <code>field:/regex/</code> on one field. <code>field:*</code> = has a value, <code>field:-</code> = empty. Field names ignore case and <code>_</code> and accept common names (<code>ip</code> → src_ip, <code>ua</code> → user_agent, <code>url</code> → path, <code>code</code> → status); <code>extra</code> keys (auditd/logfmt) work directly (<code>comm:wget</code>, <code>key:exec_watch</code>; <code>x:key</code> forces it). An unknown field shows a ⚠ warning instead of failing silently, and malformed queries (unclosed quote or parenthesis, <code>OR</code> at the end) say what is wrong. The <b>regex</b> checkbox treats the whole box as one regex. A <b>«How to filter»</b> cheatsheet sits under the box, which also <b>autocompletes field names</b>.</li>
     <li><b>Exclude (NOT)</b> with a leading <code>-</code>: <code>-cron</code> drops events with that text, <code>-user:root</code> drops that field value. Several includes and excludes can be mixed: <code>ssh_failed src_ip:192 -user:root</code>.</li>
-    <li>Reach an <code>extra</code> JSON key (auditd/logfmt/csv) with <code>x:key:value</code> or <code>extra.key:value</code>, e.g. <code>x:syscall:execve</code>. Quote values with spaces: <code>user:"john doe"</code>. There's a <b>«How to filter»</b> cheatsheet right under the search box, and the box <b>autocompletes field names</b> (including discovered <code>extra</code> keys).</li>
+    <li>Reach an <code>extra</code> JSON key (auditd/logfmt/csv) with <code>x:key:value</code> or <code>extra.key:value</code>, e.g. <code>x:comm:wget</code> (or just <code>comm:wget</code>: extra keys also work by name). Quote values with spaces: <code>user:"john doe"</code>. There's a <b>«How to filter»</b> cheatsheet right under the search box, and the box <b>autocompletes field names</b> (including discovered <code>extra</code> keys).</li>
     <li><b>Regex per token</b> without the checkbox: <code>/regex/</code> matches the raw line and <code>field:/regex/</code> a single field (e.g. <code>exe:/wget|curl/</code>), both combinable with fields and <code>-</code>NOT. The <b>regex</b> checkbox instead treats the whole box as one regex (the <code>^</code>/<code>$</code> anchors apply to the raw line).</li>
     <li><b>Field exists / empty</b>: <code>field:*</code> keeps events where that field <b>has a value</b> (e.g. <code>src_ip:*</code>), and <code>-field:*</code> (or <code>field:-</code>) keeps those where it is <b>empty or missing</b>.</li>
     <li><b>Facets</b>: pick a field and click <b>Top values</b> to see its most frequent values over the current results (bars + counts); click one to add it to the search. Categorical fields (user, src_ip, status, asn, org…) are the useful ones. The list is scrollable and has a <b>✕ hide</b>; it follows the <b>current view</b> — the <b>timeline</b> facets over everything (its source/time filters), a <b>search</b> over its matches.</li>
@@ -2120,7 +2127,7 @@ async function loadFacets(){
 }
 function facPick(el){
  const field=el.dataset.f, val=el.dataset.v||'';
- const tok=(/\s/.test(val)?field+':"'+val+'"':field+':'+val);
+ const tok=(/[\s()]/.test(val)?field+'=="'+val+'"':field+'=='+val);   // valor de faceta = exacto
  const q=document.getElementById('q');
  q.value=(q.value.trim()+' '+tok).trim();
  doSearch();
@@ -2773,20 +2780,26 @@ async function doSearch(){
  try{
   const j=await fetchSearch(0);
   if(!j){hits.innerHTML='<div class="err">error</div>';return}
-  if(!j.rows.length){hits.innerHTML='<p class="muted">No matches'+((SE.start||SE.end)?' in that time range':'')+'.</p>';return}
+  const qw=qwarnHtml(j);
+  if(!j.rows.length){hits.innerHTML=qw+'<p class="muted">No matches'+((SE.start||SE.end)?' in that time range':'')+'.</p>';return}
   SE.total=j.total; SE.offset=j.rows.length; SE.cols=j.columns; SE.rows=j.rows.slice();
-  hits.innerHTML='<div class="count" id="secount"></div>'+tableHtml(j,'serows')+'<div class="row" id="semore"></div>';
+  hits.innerHTML=qw+'<div class="count" id="secount"></div>'+tableHtml(j,'serows')+'<div class="row" id="semore"></div>';
   updateSeFooter();
- }catch(e){hits.innerHTML='<div class="err">'+e+'</div>'}
+ }catch(e){hits.innerHTML='<div class="err">&#9888; '+esc(e && e.message ? e.message : String(e))+'</div>'}
 }
 async function fetchSearch(offset){
  const r=await fetch('/search',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({q:SE.q,regex:SE.regex,source:SE.source,limit:pageSize(),offset,sort:SORT.col,desc:SORT.desc,start:SE.start||null,end:SE.end||null})});
- return r.ok ? await r.json() : null;
+ if(!r.ok){ let d='search error ('+r.status+')'; try{ d=(await r.json()).detail||d }catch(e){} throw new Error(d); }
+ return await r.json();
+}function qwarnHtml(j){
+ return (j && j.warnings && j.warnings.length)
+   ? j.warnings.map(w=>'<div class="qwarn">&#9888; '+esc(w)+'</div>').join('') : '';
 }
+
 async function loadMoreSearch(){
  const btn=document.getElementById('sebtn'); if(btn){btn.disabled=true;btn.textContent='loading…';}
- const j=await fetchSearch(SE.offset);
+ let j=null; try{ j=await fetchSearch(SE.offset); }catch(e){}
  if(j && j.rows.length){
   document.getElementById('serows').insertAdjacentHTML('beforeend', rowTrs(j));
   SE.offset+=j.rows.length; SE.rows=SE.rows.concat(j.rows);

@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import duckdb
 
+from .query import compile_query, like_escape, norm_field
 from .schema import COLUMNS, COLUMN_NAMES
 
 
@@ -47,17 +48,31 @@ class EventStore:
                     "src_ip, program, source)")
     _REGEX_TEXT = "coalesce(raw, message, '')"
 
-    # --- sintaxis de búsqueda avanzada del explorador ---------------------
-    # texto libre  -> contains sobre _SEARCH_TEXT (varias palabras = AND)
-    # campo:valor  -> ese campo CONTIENE valor (ILIKE, sin mayúsculas)
-    # campo=valor  -> ese campo es EXACTAMENTE valor
-    # campo!=valor -> ese campo NO es valor
-    # -algo        -> NOT (excluye); vale con texto libre o con campo:valor
-    # x:clave:valor o extra.clave:valor -> busca en una clave del JSON extra
-    _FIELD_ALIASES = {"ip": "src_ip", "sip": "src_ip", "sport": "src_port",
-                      "dport": "src_port", "prog": "program", "proc": "program",
-                      "msg": "message", "sev": "severity"}
+    # --- lenguaje de consulta del Explorer (la gramática está en query.py) ---
+    # Alias de nombres de campo, ya normalizados (minúsculas, sin _ - . @):
+    # así EventID, event_id, eventid… o CommandLine/command_line valen igual.
+    _FIELD_ALIASES = {
+        "time": "ts", "timestamp": "ts", "date": "ts",
+        "ip": "src_ip", "sip": "src_ip", "srcip": "src_ip", "sourceip": "src_ip",
+        "clientip": "src_ip", "client": "src_ip", "remoteip": "src_ip",
+        "rhost": "src_ip", "addr": "src_ip",
+        "port": "src_port", "sport": "src_port", "dport": "src_port",
+        "sourceport": "src_port",
+        "prog": "program", "proc": "program", "process": "program",
+        "service": "program", "app": "program",
+        "msg": "message", "sev": "severity", "level": "severity",
+        "priority": "severity",
+        "ua": "user_agent", "url": "path", "uri": "path", "request": "path",
+        "requesturi": "path", "code": "status", "statuscode": "status",
+        "httpstatus": "status", "size": "bytes", "length": "bytes",
+        "username": "user", "account": "user", "acct": "user",
+        "computer": "host", "hostname": "host", "line": "line_no",
+        "eventtype": "event", "type": "event",
+    }
     _NUM_COLS = {name for name, typ in COLUMNS if typ in ("INTEGER", "BIGINT")}
+    # Campos "código": campo:valor es exacto aunque la columna sea texto.
+    _CODE_COLS = set()
+    _COL_NORM = {norm_field(name): name for name, _t in COLUMNS}
 
     def __init__(self, path: str = ":memory:"):
         self.path = path
@@ -234,123 +249,78 @@ class EventStore:
 
     @staticmethod
     def _like_escape(s: str) -> str:
-        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return like_escape(s)
 
-    def _field_expr(self, field: str, prefix: str = ""):
-        """Resuelve un nombre de campo a (expr_sql, es_numerico).
+    def _extra_key_map(self) -> dict[str, str]:
+        """norm(clave) -> clave real del JSON extra. Se cachea y solo se
+        recalcula cuando cambia el número de eventos (tras una ingesta)."""
+        with self._lock:
+            n = self._con.execute("SELECT count(*) FROM events").fetchone()[0]
+        cached = getattr(self, "_xk_cache", None)
+        if cached and cached[0] == n:
+            return cached[1]
+        m: dict[str, str] = {}
+        for k in self.extra_keys():
+            m.setdefault(norm_field(k), k)
+        self._xk_cache = (n, m)
+        return m
 
-        Con prefijo x: / extra. apunta a una clave del JSON extra. Sin prefijo,
-        solo acepta columnas reales o alias (ip->src_ip…); un nombre
-        desconocido devuelve None (para que se trate como texto libre y no
-        rompa búsquedas tipo http://… o foo=bar)."""
-        if prefix:                       # x: o extra. -> clave del JSON extra
-            key = field.strip()          # se respeta el case (auditd/logfmt lo distingue)
+    def _resolve_field(self, name: str, prefix: str = ""):
+        """Nombre de campo -> (expr_sql, tipo) o None.
+
+        tipo: 'num' | 'ts' | 'code' | 'text'. Con prefijo x:/extra. apunta a
+        una clave del JSON extra (respetando mayúsculas). Sin prefijo acepta
+        columnas, alias (en cualquier formato: EventID, event_id…), y como
+        último recurso claves de extra (sin mayúsculas), p.ej. TargetObject."""
+        key = (name or "").strip()
+        if prefix:
             if re.fullmatch(r"[\w.\-]{1,64}", key):
-                return f"(ev.extra->>'{key}')", False
+                return f"(ev.extra->>'{key}')", "text"
             return None
-        f = field.strip().lower()
-        f = self._FIELD_ALIASES.get(f, f)
-        if f in COLUMN_NAMES:
-            return f'ev."{f}"', (f in self._NUM_COLS)
+        low = key.lower()
+        for pre in ("eventdata.", "event_data.", "extra."):
+            if low.startswith(pre):
+                key = key[len(pre):]
+                break
+        n = norm_field(key)
+        if not n:
+            return None
+        col = self._FIELD_ALIASES.get(n) or self._COL_NORM.get(n)
+        if col:
+            if col in self._NUM_COLS:
+                kind = "num"
+            elif col == "ts":
+                kind = "ts"
+            elif col in self._CODE_COLS:
+                kind = "code"
+            else:
+                kind = "text"
+            return f'ev."{col}"', kind
+        real = self._extra_key_map().get(n)
+        if real and re.fullmatch(r"[\w.\-]{1,64}", real):
+            return f"(ev.extra->>'{real}')", "text"
         return None
 
-    def _clause_for_token(self, tok: str):
-        """Traduce un token de búsqueda a (fragmento_sql, params).
+    def _field_expr(self, field: str, prefix: str = ""):
+        """Compat: (expr_sql, es_numerico) o None."""
+        r = self._resolve_field(field, prefix)
+        return (r[0], r[1] == "num") if r else None
 
-        Admite regex por token (combinable con campos, NOT y AND):
-        /patrón/ busca por regex en el texto completo, y campo:/patrón/ aplica
-        la regex solo a ese campo. Para valores con espacios, entrecomilla el
-        token: "msg:/foo bar/"."""
-        neg = False
-        t = tok
-        if t.startswith("-") and len(t) > 1:
-            neg, t = True, t[1:]
-        frag, params = None, []
-        # /regex/ libre sobre el texto completo
-        if len(t) > 2 and t.startswith("/") and t.endswith("/"):
-            frag = f"regexp_matches({self._REGEX_TEXT}, ?, 'i')"
-            params = [t[1:-1]]
-        if frag is None:
-            m = re.match(r"^((?:x:|extra\.))?([\w.\-]+?)(!=|=|:)(.*)$", t)
-            if m:
-                fx = self._field_expr(m.group(2), m.group(1) or "")
-                if fx is not None:
-                    expr, is_num = fx
-                    op, val = m.group(3), m.group(4)
-                    is_re = (op == ":" and len(val) > 2
-                             and val.startswith("/") and val.endswith("/"))
-                    if val == "*" and op in (":", "="):   # existe (con contenido)
-                        frag = (f"({expr} IS NOT NULL AND "
-                                f"CAST({expr} AS VARCHAR) <> '')")
-                    elif val == "-" and op in (":", "="):  # vacío o nulo
-                        frag = (f"({expr} IS NULL OR "
-                                f"CAST({expr} AS VARCHAR) = '')")
-                    elif is_re:                           # campo:/regex/
-                        frag = f"regexp_matches(CAST({expr} AS VARCHAR), ?, 'i')"
-                        params = [val[1:-1]]
-                    elif op == ":":                     # contiene
-                        frag = f"CAST({expr} AS VARCHAR) ILIKE ? ESCAPE '\\'"
-                        params = [f"%{self._like_escape(val)}%"]
-                    elif op == "=":                     # exacto
-                        if is_num and re.fullmatch(r"-?\d+", val):
-                            frag, params = f"{expr} = ?", [int(val)]
-                        else:
-                            frag = f"lower(CAST({expr} AS VARCHAR)) = lower(?)"
-                            params = [val]
-                    else:                               # != (no exacto)
-                        frag = (f"({expr} IS NULL OR "
-                                f"lower(CAST({expr} AS VARCHAR)) <> lower(?))")
-                        params = [val]
-        if frag is None:                            # texto libre
-            frag = f"{self._SEARCH_TEXT} ILIKE ? ESCAPE '\\'"
-            params = [f"%{self._like_escape(t)}%"]
-        if neg:
-            frag = f"NOT coalesce({frag}, FALSE)"
-        return frag, params
+    def _compile_search(self, q: str):
+        """Consulta del Explorer -> (sql, params, avisos). Ver query.py."""
+        memo: dict = {}
 
-    @staticmethod
-    def _pre_contains(q: str) -> str:
-        """Acepta la forma con palabra: «campo contains valor» -> campo:valor."""
-        return re.sub(r'(?i)\b([\w.]+)\s+contains\s+("[^"]*"|\S+)',
-                      lambda m: m.group(1) + ":" + m.group(2).strip('"'), q)
-
-    @staticmethod
-    def _tokenize(q: str) -> list[str]:
-        """Separa por espacios respetando comillas, SIN tocar las barras
-        invertidas (shlex se las comería y rompería las regex /\\s+\\w+/)."""
-        toks: list[str] = []
-        cur = ""
-        quote = None
-        for c in q:
-            if quote:
-                if c == quote:
-                    quote = None
-                else:
-                    cur += c
-            elif c in "\"'":
-                quote = c
-            elif c.isspace():
-                if cur:
-                    toks.append(cur)
-                    cur = ""
-            else:
-                cur += c
-        if cur:
-            toks.append(cur)
-        return toks
+        def resolve(name: str, prefix: str):
+            k = (name, prefix)
+            if k not in memo:
+                memo[k] = self._resolve_field(name, prefix)
+            return memo[k]
+        return compile_query(q, resolve, self._SEARCH_TEXT, self._REGEX_TEXT)
 
     def _parse_search(self, q: str):
-        """Tokeniza respetando comillas y devuelve (where_frags, params)."""
-        q = self._pre_contains(q)
-        frags: list[str] = []
-        params: list[Any] = []
-        for tok in self._tokenize(q):
-            if not tok:
-                continue
-            fr, ps = self._clause_for_token(tok)
-            frags.append(fr)
-            params.extend(ps)
-        return frags, params
+        """Compat: devuelve ([fragmento_where], params)."""
+        sql, params, _w = self._compile_search(q)
+        return [sql], params
 
     def search(self, q: str, regex: bool = False, source: Optional[str] = None,
                limit: int = 500, offset: int = 0, sort: Optional[str] = None,
@@ -361,15 +331,14 @@ class EventStore:
             raise ValueError("Consulta de búsqueda vacía.")
         where = []
         params: list[Any] = []
+        warnings: list[str] = []
         if regex:
             where.append(f"regexp_matches({self._REGEX_TEXT}, ?, 'i')")
             params.append(q)
         else:
-            # sintaxis avanzada: texto libre + campo:valor + exacto + NOT
-            frags, fparams = self._parse_search(q)
-            if not frags:
-                raise ValueError("Consulta de búsqueda vacía.")
-            where.extend(frags)
+            # lenguaje de consulta (query.py): campos, AND/OR/NOT, (), etc.
+            qsql, fparams, warnings = self._compile_search(q)
+            where.append(qsql)
             params.extend(fparams)
         if source and source not in ("", "(todos)", "(all)"):
             where.append("ev.source = ?")
@@ -394,7 +363,8 @@ class EventStore:
             rows = cur.fetchall()
         return {"columns": names,
                 "rows": [[_jsonable(v) for v in r] for r in rows],
-                "rowcount": len(rows), "total": total, "offset": int(offset)}
+                "rowcount": len(rows), "total": total, "offset": int(offset),
+                "warnings": warnings}
 
     def _facet_where(self, q: str, regex: bool, source: Optional[str],
                      start: Optional[str], end: Optional[str]):
@@ -430,9 +400,9 @@ class EventStore:
         elif f.startswith("extra."):
             f = f[6:]
         else:
-            fl = self._FIELD_ALIASES.get(f.lower(), f.lower())
-            if fl in COLUMN_NAMES:
-                return f'ev."{fl}"'
+            r = self._resolve_field(f)
+            if r is not None:
+                return r[0]
         if re.fullmatch(r"[\w.\-]{1,64}", f):
             return f"(ev.extra->>'{f}')"
         return None
