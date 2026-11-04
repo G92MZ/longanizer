@@ -1,27 +1,27 @@
 """Lenguaje de consulta del Explorer (común a Longanizer y WinHound).
 
-Sintaxis (estilo KQL/Lucene, sin mayúsculas en nombres ni valores):
+Sintaxis (estilo KQL/Splunk, sin mayúsculas en nombres ni valores).
+Dos operadores de campo, fáciles de recordar:
+
+  campo=valor             IGUAL a valor (exacto, literal)        user=root
+  campo:valor             CONTIENE valor; admite * ? y /regex/  image:powershell
+  (en campos numéricos / código los dos son exactos: eid:6 = eid=6 ≠ 4661)
 
   palabra                 texto libre: el evento CONTIENE la palabra
   "frase con espacios"    texto libre literal (también protege AND/OR/NOT)
-  campo:valor             campo coincide con valor   (':' y '=' son lo mismo)
   campo = valor           se admiten espacios alrededor del operador
-  campo==valor            exacto y literal (sin comodines ni listas), también en texto
-  campo!=valor            NO coincide (igual que -campo:valor)
+  campo!=valor            distinto (igual que -campo=valor)
   campo>N  >=  <  <=      comparación (números y fechas: ts>=2026-10-01)
-  campo:a,b,c             lista (cualquiera de los valores)
+  campo=a,b,c             lista en campos numéricos / código (eid=4624,4625)
   campo:*valor*           comodines * y ? (anclados: image:*\\cmd.exe)
   campo:/regex/  /regex/  expresión regular (en el campo / en el texto)
   campo:*   campo:-       el campo tiene valor / está vacío
+  ts:2026-10-01           fechas por prefijo (ese día; igual con '=')
   a b  ·  a AND b         AND (implícito)
   a OR b                  OR
   NOT a  ·  -a            negación
   ( ... )                 agrupar
-
-Coincidencia de 'campo:valor' según el tipo de campo:
-  numérico / código (eid, pid, status, logon_type…)  -> exacto (eid:6 ≠ 4661)
-  fecha (ts)                                          -> prefijo (ts:2026-10-01)
-  texto                                               -> contiene
+  campo==valor            sinónimo de '=' (compatibilidad)
 """
 from __future__ import annotations
 
@@ -312,16 +312,18 @@ class Compiler:
 
     def _field_clause(self, name: str, expr: str, kind: str, op: str, val: str):
         sval = f"CAST({expr} AS VARCHAR)"
-        if op == "!=":
-            f, p = self._field_clause(name, expr, kind, ":", val)
+        if op == "==":                       # sinónimo de '=' (compatibilidad)
+            op = "="
+        if op == "!=":                       # distinto = NOT (igual)
+            f, p = self._field_clause(name, expr, kind, "=", val)
             return f"NOT coalesce({f}, FALSE)", p
-        if val == "" and op in (":", "=", "=="):
+        if val == "" and op in (":", "="):
             raise QueryError(f"'{name}{op}' has no value. Use {name}:* (has a value) or {name}:- (empty).")
-        if op in (":", "=") and val == "*":
+        if op == ":" and val == "*":
             return f"({expr} IS NOT NULL AND {sval} <> '')", []
-        if op in (":", "=") and val == "-":
+        if op == ":" and val == "-":
             return f"({expr} IS NULL OR {sval} = '')", []
-        if op in (":", "=") and len(val) > 2 and val.startswith("/") and val.endswith("/"):
+        if op == ":" and len(val) > 2 and val.startswith("/") and val.endswith("/"):
             return f"regexp_matches({sval}, ?, 'i')", [val[1:-1]]
 
         if op in (">", ">=", "<", "<="):
@@ -335,10 +337,9 @@ class Compiler:
                 return f"{expr} {op} CAST(? AS TIMESTAMP)", [val.replace("T", " ").rstrip("Z")]
             return f"lower({sval}) {op} lower(?)", [val]
 
-        literal = op == "=="                 # '==' = valor literal: sin comodines ni listas
+        literal = op == "="                  # '=' = igual, valor literal (sin comodines)
         exact = literal or kind in ("num", "code")
-        vals = ([v.strip() for v in val.split(",")]
-                if kind in ("num", "code") and not literal else [val])
+        vals = [v.strip() for v in val.split(",")] if kind in ("num", "code") else [val]
         vals = [v for v in vals if v != ""] or [val]
 
         if kind == "num":
@@ -364,7 +365,7 @@ class Compiler:
                     params.append(v)
             return ("(" + " OR ".join(frags) + ")" if len(frags) > 1 else frags[0]), params
 
-        if kind == "ts" and op != "==":
+        if kind == "ts":                     # fecha: prefijo (ts:2026-10-01 = ese día)
             return f"{sval} LIKE ? ESCAPE '\\'", [like_escape(val.replace("T", " ")) + "%"]
 
         frags, params = [], []

@@ -1517,7 +1517,7 @@ INDEX_HTML = r"""<!doctype html>
     <div class="tbglabel">Search</div>
     <div class="tbrow">
      <div class="fld grow qacwrap">
-      <label for="q">Text, IOC, IP or hash <span class="hintlbl">· <code>field:value</code> · <code>AND</code> <code>OR</code> <code>NOT</code> <code>( )</code> · see «How to filter» below</span></label>
+      <label for="q">Text, IOC, IP or hash <span class="hintlbl">· <code>field=value</code> equal · <code>field:value</code> contains · <code>AND</code> <code>OR</code> <code>NOT</code> <code>( )</code> · see «How to filter» below</span></label>
       <input type="text" id="q" placeholder="Failed  status:404  user:root  NOT program:cron" autofocus autocomplete="off">
       <div id="qac" class="qac hidden"></div>
      </div>
@@ -1532,26 +1532,26 @@ INDEX_HTML = r"""<!doctype html>
      <button class="bigbtn" onclick="doSearch()">Search</button>
     </div>
     <details class="qhelp">
-     <summary>How to filter &mdash; fields, AND / OR / NOT, exact match, wildcards</summary>
+     <summary>How to filter &mdash; <b>=</b> equal · <b>:</b> contains · AND / OR / NOT · wildcards</summary>
      <div class="qhelpbody">
       <table>
        <tr><td><code>Failed password</code></td><td>free text; several words = <b>AND</b> (all must appear)</td></tr>
        <tr><td><code>"Failed password"</code></td><td>exact phrase (quotes). Quotes also let you search the words and / or / not</td></tr>
-       <tr><td><code>status:404 &nbsp; status=404 &nbsp; Status = 404</code></td><td><b><code>:</code> and <code>=</code> are the same</b>; spaces around them are fine. Number fields (status, pid, src_port, bytes, line_no) match <b>exactly</b>, so <code>status:40</code> never matches 404</td></tr>
-       <tr><td><code>user:root &nbsp; exe:wget</code></td><td>text fields match when they <b>contain</b> the value (case-insensitive)</td></tr>
-       <tr><td><code>user==root &nbsp; path==/admin</code></td><td><code>==</code> = <b>exact</b> match, also on text fields (<code>user==root</code> skips root2)</td></tr>
+       <tr><td><code>user=root &nbsp; path=/admin</code></td><td><b><code>=</code> means equal</b>: the exact value (case-insensitive), so <code>user=root</code> skips root2. This is what clicking &#8853; adds</td></tr>
+       <tr><td><code>user:root &nbsp; exe:wget</code></td><td><b><code>:</code> means contains</b> (case-insensitive). It also takes wildcards and regex, see below</td></tr>
+       <tr><td><code>status=404 &nbsp; status:404 &nbsp; Status = 404</code></td><td>number fields (status, pid, src_port, bytes, line_no) are always exact with either operator, so <code>status:40</code> never matches 404. Spaces around the operator are fine</td></tr>
+       <tr><td><code>status=404,500</code></td><td>any of several numbers (commas)</td></tr>
        <tr><td><code>user_agent:*curl* &nbsp; status:4*</code></td><td>wildcards <code>*</code> <code>?</code> over the whole value</td></tr>
-       <tr><td><code>status:404,500</code></td><td>any of several values (commas)</td></tr>
        <tr><td><code>status&gt;=500 &nbsp; ts&gt;=2026-10-01</code></td><td>compare numbers and dates with <code>&gt; &gt;= &lt; &lt;=</code>. <code>ts:2026-10-01</code> = that whole day</td></tr>
-       <tr><td><code>src_ip=1.2.3.4 OR src_ip=5.6.7.8</code></td><td><b>AND</b> (default), <b>OR</b>, <b>NOT</b> and <b>( )</b>: <code>(Failed OR Accepted) user:root</code></td></tr>
-       <tr><td><code>NOT user:root &nbsp; -user:root &nbsp; user!=root</code></td><td><b>exclude</b> — three equivalent forms; <code>-word</code> works on free text too</td></tr>
+       <tr><td><code>src_ip=1.2.3.4 OR src_ip=5.6.7.8</code></td><td><b>AND</b> (default), <b>OR</b>, <b>NOT</b> and <b>( )</b>: <code>(Failed OR Accepted) user=root</code></td></tr>
+       <tr><td><code>NOT user=root &nbsp; -user=root &nbsp; user!=root</code></td><td><b>exclude</b> — three equivalent forms; <code>-word</code> works on free text too</td></tr>
        <tr><td><code>comm:wget &nbsp; x:comm:wget</code></td><td>keys of the <code>extra</code> JSON (auditd/logfmt) work by name; <code>x:</code> forces an extra key (exact case)</td></tr>
-       <tr><td><code>/failed|invalid/ &nbsp; exe:/wget|curl/</code></td><td>regex over the raw line, or on one field</td></tr>
+       <tr><td><code>/failed|invalid/ &nbsp; exe:/wget|curl/</code></td><td>regex over the raw line, or on one field (with <code>:</code>)</td></tr>
        <tr><td><code>user:* &nbsp; user:-</code></td><td>the field <b>has a value</b> / is <b>empty or missing</b></td></tr>
        <tr><td><code>user:"john doe"</code></td><td>quotes for values with spaces</td></tr>
-       <tr><td><code>&#8853; / &#8854; on a cell</code></td><td>hover any value in the results and click <b>&#8853;</b> to add <code>field==value</code> or <b>&#8854;</b> to exclude it. Shortcut: <b>Ctrl/⌘-click</b> the cell (<b>+Shift</b> = exclude)</td></tr>
+       <tr><td><code>&#8853; / &#8854; on a cell</code></td><td>hover any value in the results and click <b>&#8853;</b> to add <code>field=value</code> or <b>&#8854;</b> to exclude it (<code>-field=value</code>). Shortcut: <b>Ctrl/⌘-click</b> the cell (<b>+Shift</b> = exclude)</td></tr>
       </table>
-      <p class="hintlbl">Example: <code>status:404 src_ip:203.0.113.55</code>. Field names ignore case and <code>_</code>, and common names work: <code>ip</code>/<code>client_ip</code> → src_ip, <code>ua</code>/<code>UserAgent</code> → user_agent, <code>url</code>/<code>uri</code> → path, <code>code</code> → status, <code>level</code> → severity, <code>prog</code>/<code>process</code> → program. Fields: ts, source, host, program, pid, severity, user, src_ip, src_port, exe, method, path, status, bytes, referer, user_agent, event, message, src_file, line_no. An unknown field shows a ⚠ warning and is searched as plain text. The <b>regex</b> checkbox treats the WHOLE box as one regex.</p>
+      <p class="hintlbl">Remember: <b><code>=</code> equal · <code>:</code> contains</b>. Example: <code>status=404 src_ip=203.0.113.55</code>. Field names ignore case and <code>_</code>, and common names work: <code>ip</code>/<code>client_ip</code> → src_ip, <code>ua</code>/<code>UserAgent</code> → user_agent, <code>url</code>/<code>uri</code> → path, <code>code</code> → status, <code>level</code> → severity, <code>prog</code>/<code>process</code> → program. Fields: ts, source, host, program, pid, severity, user, src_ip, src_port, exe, method, path, status, bytes, referer, user_agent, event, message, src_file, line_no. An unknown field shows a ⚠ warning and is searched as plain text. The <b>regex</b> checkbox treats the WHOLE box as one regex.</p>
      </div>
     </details>
     <details class="qhelp savedbox" ontoggle="if(this.open)renderSaved()">
@@ -1636,7 +1636,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <div id="colspanel" class="hidden"></div>
-  <p class="muted tbnote">Searches message, raw line, exe, path, user and IP. Click a result (or use its <b>#</b>) to see its context: N lines or X minutes before and after by timestamp, across the whole timeline (not just that one log). The <b>#</b> is the position in the timeline (1 = oldest). <b>Hover a cell and click &#8853; / &#8854;</b> (or Ctrl/⌘-click it, +Shift to exclude) to add <code>field==value</code> to the query.</p>
+  <p class="muted tbnote">Searches message, raw line, exe, path, user and IP. Click a result (or use its <b>#</b>) to see its context: N lines or X minutes before and after by timestamp, across the whole timeline (not just that one log). The <b>#</b> is the position in the timeline (1 = oldest). <b>Hover a cell and click &#8853; / &#8854;</b> (or Ctrl/⌘-click it, +Shift to exclude) to add <code>field=value</code> to the query.</p>
   <div id="gotoout"></div>
   <div id="hits"></div>
  </section>
@@ -1861,8 +1861,8 @@ LIMIT 50;</textarea>
    <ul>
     <li>Type any text: an IOC, an IP, a hash, a path, a piece of a command. Searches the message, the raw line, <code>exe</code>, path, user and IP. Case-insensitive.</li>
     <li><b>Multiple words = AND</b> (all must appear in the same event). E.g. <code>suid bash</code>.</li>
-    <li><b>Filter from the results</b>: hover any cell and click <b>&#8853;</b> to add <code>field==value</code> to the query (or <b>&#8854;</b> to exclude it, <code>-field==value</code>); the search re-runs at once. Shortcut: <b>Ctrl/⌘-click</b> the cell, with <b>Shift</b> to exclude. Values with spaces are quoted for you and empty cells become <code>field:-</code>. A normal click on the row still opens its context.</li>
-    <li><b>Query language</b> (Explorer search box; same in WinHound): <code>field:value</code> and <code>field=value</code> are <b>the same</b> and spaces around them are fine (<code>status = 404</code>). Number fields (<code>status</code>, <code>pid</code>, <code>src_port</code>, <code>bytes</code>) match <b>exactly</b>; text fields match when they <b>contain</b> the value. <code>==</code> forces an exact match on text (<code>user==root</code>); wildcards <code>*</code>/<code>?</code> match the whole value (<code>user_agent:*curl*</code>); lists <code>status:404,500</code>; comparisons <code>status&gt;=500</code>, <code>ts&gt;=2026-10-01</code>, and <code>ts:2026-10-01</code> for a whole day. Combine with <b>AND</b> (default, words separated by spaces), <b>OR</b>, <b>NOT</b> and <b>( )</b>: <code>(Failed OR Accepted) user:root NOT src_ip:10.</code>. Exclude also with <code>-term</code> or <code>field!=value</code>. Quotes give a literal phrase (<code>"Failed password"</code>). Regex per term: <code>/regex/</code> over the raw line, <code>field:/regex/</code> on one field. <code>field:*</code> = has a value, <code>field:-</code> = empty. Field names ignore case and <code>_</code> and accept common names (<code>ip</code> → src_ip, <code>ua</code> → user_agent, <code>url</code> → path, <code>code</code> → status); <code>extra</code> keys (auditd/logfmt) work directly (<code>comm:wget</code>, <code>key:exec_watch</code>; <code>x:key</code> forces it). An unknown field shows a ⚠ warning instead of failing silently, and malformed queries (unclosed quote or parenthesis, <code>OR</code> at the end) say what is wrong. The <b>regex</b> checkbox treats the whole box as one regex. A <b>«How to filter»</b> cheatsheet sits under the box, which also <b>autocompletes field names</b>.</li>
+    <li><b>Filter from the results</b>: hover any cell and click <b>&#8853;</b> to add <code>field=value</code> (equal) to the query (or <b>&#8854;</b> to exclude it, <code>-field=value</code>); the search re-runs at once. Shortcut: <b>Ctrl/⌘-click</b> the cell, with <b>Shift</b> to exclude. Values with spaces are quoted for you and empty cells become <code>field:-</code>. A normal click on the row still opens its context.</li>
+    <li><b>Query language</b> (Explorer search box; same in WinHound). Two field operators: <b><code>field=value</code> means equal</b> (the exact value, case-insensitive: <code>user=root</code> skips root2) and <b><code>field:value</code> means contains</b> (<code>exe:wget</code>). Number fields (<code>status</code>, <code>pid</code>, <code>src_port</code>, <code>bytes</code>) are always exact with either one, so <code>status:40</code> never matches 404. Spaces around the operator are fine (<code>status = 404</code>). With <code>:</code> you also get wildcards (<code>user_agent:*curl*</code>), regex (<code>exe:/wget|curl/</code>), <code>field:*</code> (has a value) and <code>field:-</code> (empty). Lists of numbers: <code>status=404,500</code>; comparisons: <code>status&gt;=500</code>, <code>ts&gt;=2026-10-01</code>; <code>ts:2026-10-01</code> = a whole day. Combine with <b>AND</b> (default, words separated by spaces), <b>OR</b>, <b>NOT</b> and <b>( )</b>: <code>(Failed OR Accepted) user=root NOT src_ip:10.</code>. Exclude also with <code>-term</code> or <code>field!=value</code> (not equal). Quotes give a literal phrase (<code>"Failed password"</code>); <code>/regex/</code> alone searches the raw line. Field names ignore case and <code>_</code> and accept common names (<code>ip</code> → src_ip, <code>ua</code> → user_agent, <code>url</code> → path, <code>code</code> → status); <code>extra</code> keys (auditd/logfmt) work directly (<code>comm:wget</code>, <code>key:exec_watch</code>; <code>x:key</code> forces it). An unknown field shows a ⚠ warning instead of failing silently, and malformed queries (unclosed quote or parenthesis, <code>OR</code> at the end) say what is wrong. The <b>regex</b> checkbox treats the whole box as one regex. A <b>«How to filter»</b> cheatsheet sits under the box, which also <b>autocompletes field names</b>. (<code>==</code> still works as a synonym of <code>=</code>.)</li>
     <li><b>Exclude (NOT)</b> with a leading <code>-</code>: <code>-cron</code> drops events with that text, <code>-user:root</code> drops that field value. Several includes and excludes can be mixed: <code>ssh_failed src_ip:192 -user:root</code>.</li>
     <li>Reach an <code>extra</code> JSON key (auditd/logfmt/csv) with <code>x:key:value</code> or <code>extra.key:value</code>, e.g. <code>x:comm:wget</code> (or just <code>comm:wget</code>: extra keys also work by name). Quote values with spaces: <code>user:"john doe"</code>. There's a <b>«How to filter»</b> cheatsheet right under the search box, and the box <b>autocompletes field names</b> (including discovered <code>extra</code> keys).</li>
     <li><b>Regex per token</b> without the checkbox: <code>/regex/</code> matches the raw line and <code>field:/regex/</code> a single field (e.g. <code>exe:/wget|curl/</code>), both combinable with fields and <code>-</code>NOT. The <b>regex</b> checkbox instead treats the whole box as one regex (the <code>^</code>/<code>$</code> anchors apply to the raw line).</li>
@@ -2012,7 +2012,7 @@ WHERE source='auditd' AND (extra-&gt;&gt;'key') IS NOT NULL;</pre>
   </div>
  </section>
 </main>
-<div id="cfbar" class="hidden"><button onclick="cfAct(event,1)" title="Filter for this value (field==value) · shortcut: Ctrl/⌘-click the cell">&#8853;</button><button onclick="cfAct(event,0)" title="Filter out this value · shortcut: Ctrl/⌘+Shift-click the cell">&#8854;</button></div>
+<div id="cfbar" class="hidden"><button onclick="cfAct(event,1)" title="Filter for this value (field=value) · shortcut: Ctrl/⌘-click the cell">&#8853;</button><button onclick="cfAct(event,0)" title="Filter out this value · shortcut: Ctrl/⌘+Shift-click the cell">&#8854;</button></div>
 <div id="rawmodal" class="rawmodal hidden" onclick="if(event.target===this)closeRaw()">
  <div class="rawmbox">
   <div class="rawmbar"><span>Structured event</span>
@@ -2134,7 +2134,7 @@ async function loadFacets(){
 }
 function facPick(el){
  const field=el.dataset.f, val=el.dataset.v||'';
- const tok=(/[\s()]/.test(val)?field+'=="'+val+'"':field+'=='+val);   // valor de faceta = exacto
+ const tok=fltToken(field,val,true); if(!tok) return;   // valor de faceta = igual (mismo formato que el clic en celda)
  const q=document.getElementById('q');
  q.value=(q.value.trim()+' '+tok).trim();
  doSearch();
@@ -2753,7 +2753,7 @@ function rowTrs(j){
  return h;
 }
 /* ---------- filtrar desde una celda: ⊕ / ⊖ al pasar el ratón, o Ctrl/⌘-clic
-   (con Shift = excluir). Añade campo==valor (o -campo==valor) a la consulta. */
+   (con Shift = excluir). Añade campo=valor (o -campo=valor) a la consulta. */
 const NOFILTER=new Set(['seq','asn','org','extra']);
 let ROWMAP={}, ROWIDX=null, CF_TD=null;
 function fAttr(c,html){ return NOFILTER.has(c) ? html : html.replace('<td','<td data-f="'+esc(c)+'"'); }
@@ -2768,7 +2768,7 @@ function fltToken(field,v,inc){
    else if(s.indexOf("'")<0) s="'"+s+"'";
    else return null;
   }
-  t=field+'=='+s;
+  t=field+'='+s;
  }
  return (inc?'':'-')+t;
 }

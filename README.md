@@ -31,7 +31,7 @@ python run.py --db case.duckdb  # keep the case in a file instead of memory
 ## 🧭 How you use it
 
 1. **📥 Load** — point it at a folder or drop files (`.zip`/`.tar.gz` auto‑extract). It auto‑detects each log type.
-2. **🔎 Explore** — browse the timeline or search. One query language in both apps: `field:value` (= `field=value`), `AND` / `OR` / `NOT`, `( )`, `-term`, wildcards, lists (`status:404,500`), comparisons (`status>=500`) and `/regex/`. Bad fields or syntax get a clear warning. Hover any value in the results and click ⊕ / ⊖ (or Ctrl/⌘-click) to add `field==value` to the query. The box autocompletes field names.
+2. **🔎 Explore** — browse the timeline or search. One query language in both apps: `field=value` (equal) and `field:value` (contains), `AND` / `OR` / `NOT`, `( )`, `-term`, wildcards, lists (`status:404,500`), comparisons (`status>=500`) and `/regex/`. Bad fields or syntax get a clear warning. Hover any value in the results and click ⊕ / ⊖ (or Ctrl/⌘-click) to add `field=value` to the query. The box autocompletes field names.
 3. **🛡️ Hunt** — run your **Sigma** rules over everything, see what matched, pivot to context.
 4. **📌 Triage** — mark events as pending / TP / FP with a note (saved inside the case file).
 5. **📄 Report** — export a self‑contained HTML case report to share.
