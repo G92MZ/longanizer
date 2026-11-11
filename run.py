@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Arranca el servicio web.
 
-  python run.py                         # en memoria, http://127.0.0.1:8000
+  python run.py                         # en memoria, accesible desde la red (puerto 8000)
   python run.py --port 8001             # otro puerto (p.ej. 2 apps a la vez)
-  python run.py --host 0.0.0.0 --port 9000
+  python run.py --host 127.0.0.1        # solo accesible desde este equipo
   python run.py --db caso.duckdb        # persiste el caso en fichero
   python run.py --no-update             # no comprobar actualizaciones al arrancar
 
@@ -21,6 +21,28 @@ import os
 import sys
 
 import uvicorn
+
+
+def _lan_ip() -> str:
+    """IP de este equipo en la red local (sin enviar tráfico)."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
+
+
+def _print_urls(host: str, port: int) -> None:
+    """Dice dónde abrir la app (uvicorn muestra 0.0.0.0, que no sirve en el navegador)."""
+    if host in ("0.0.0.0", "::", ""):
+        ip = _lan_ip()
+        print(f"[run] Abre http://127.0.0.1:{port} en este equipo"
+              + (f" o http://{ip}:{port} desde otro equipo de la red" if ip else ""),
+              file=sys.stderr)
+    else:
+        print(f"[run] Abre http://{host}:{port}", file=sys.stderr)
 
 
 def _check_updates(auto_yes: bool) -> None:
@@ -66,8 +88,8 @@ def _check_updates(auto_yes: bool) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(prog="run.py", description="Servicio web Longanizer")
-    ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"),
-                    help="interfaz de escucha (por defecto 127.0.0.1)")
+    ap.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"),
+                    help="interfaz de escucha (por defecto 0.0.0.0 = todas; 127.0.0.1 = solo este equipo)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")),
                     help="puerto (por defecto 8000; cámbialo para tener varias apps a la vez)")
     ap.add_argument("--db", default=None,
@@ -84,6 +106,7 @@ if __name__ == "__main__":
     if args.db:
         os.environ["DUCKDB_PATH"] = args.db
 
+    _print_urls(args.host, args.port)
     uvicorn.run(
         "loganalyzer.app:app",
         host=args.host,

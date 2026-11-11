@@ -20,11 +20,12 @@ extraction & sweep, GeoIP and a one‑click case report. Runs **100% offline**.
 
 ```bash
 pip install -r requirements.txt
-python run.py                 # open http://127.0.0.1:8000
+python run.py                 # open http://127.0.0.1:8000 (or http://<this-pc-ip>:8000 from another machine)
 ```
 
 ```bash
-python run.py --port 8001     # run next to EVTXray on another port
+python run.py --port 8001     # run next to WinHound on another port
+python run.py --host 127.0.0.1  # only reachable from this machine
 python run.py --db case.duckdb  # keep the case in a file instead of memory
 ```
 
