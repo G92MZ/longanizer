@@ -209,10 +209,17 @@ font-family:var(--mono);font-size:12px;white-space:pre-wrap;overflow:auto;margin
 .badge-pendiente{color:#e3b341;border-color:#e3b341}.badge-TP{color:#ff7b72;border-color:#f85149}
 .badge-FP{color:#56d364;border-color:#3fb950}.badge-descartado{color:var(--muted)}
 .note{font-size:12px;margin-top:3px}
+/* textos largos (JSON, base64, rutas, comandos): nunca ensanchan el panel */
+details{min-width:0;overflow-wrap:anywhere}
+.mk>div{flex:1;min-width:0}
+.mk .badge{min-width:78px;text-align:center;flex:0 0 auto}
+.mk .mono{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;max-height:14em;overflow:auto;
+background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 9px;margin-bottom:4px}
+.note{overflow-wrap:anywhere;word-break:break-word}
 footer{max-width:1100px;margin:30px auto 0;padding:16px 24px;border-top:1px solid var(--border);
 color:var(--muted);font-size:12px;text-align:center}
 footer b{color:var(--accent)}
-@media print{body{background:#fff;color:#000}details{break-inside:avoid}}
+@media print{body{background:#fff;color:#000}details{break-inside:avoid}.mk .mono{max-height:none;overflow:visible;background:none}}
 """
 
 
