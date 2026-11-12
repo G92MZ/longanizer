@@ -1,0 +1,91 @@
+site_name: Longanizer
+site_description: Forensic Linux log analyzer — parse once, query with SQL, hunt with Sigma. Local and offline.
+site_url: https://g92mz.github.io/longanizer/
+repo_url: https://github.com/G92MZ/longanizer
+repo_name: G92MZ/longanizer
+edit_uri: edit/main/docs/
+copyright: © 2026 Gregorio Moreno (gmzpt) · Apache-2.0
+
+theme:
+  name: material
+  icon:
+    logo: material/food-hot-dog
+    repo: fontawesome/brands/github
+  favicon: assets/favicon.svg
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: light blue
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: light blue
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.tabs.link
+
+extra_css:
+  - assets/extra.css
+
+plugins:
+  - search
+  - glightbox:
+      zoomable: true
+      skip_classes: [no-lightbox]
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.keys
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Log formats: log-formats.md
+  - Investigate:
+      - Explorer and timeline: investigate/explorer.md
+      - Overview and GeoIP: investigate/overview.md
+      - IOCs and IOC sweep: investigate/iocs.md
+      - Network: investigate/network.md
+      - SQL: investigate/sql.md
+      - Marks and report: investigate/marks-report.md
+  - Detection:
+      - Sigma: detection/sigma.md
+      - ATT&CK matrix: detection/attack.md
+      - GTFOBins: detection/gtfobins.md
+  - AI and MCP: ai-mcp.md
+  - Reference:
+      - Query language: reference/query-language.md
+      - Data model: reference/data-model.md
+      - SQL recipes: reference/sql-recipes.md
+      - Licences and data: reference/licences.md

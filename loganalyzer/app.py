@@ -590,7 +590,7 @@ def mcp_info():
             "<div class=\"err\" style=\"white-space:normal\">There is no case file in use "
             "right now, so the MCP server <b>would not see</b> this data." + extra +
             " To use MCP, load logs (the file will be created) or start with a fixed one: "
-            "<code>DUCKDB_PATH=/ruta/al/caso.duckdb python -m loganalyzer.app</code> "
+            "<code>python run.py --db /path/to/case.duckdb</code> "
             "(or CLI ingest with <code>--db</code>) and point MCP at the same "
             "file.</div>")
     claude_json = (
@@ -802,8 +802,8 @@ def gtfobins_refresh_ep():
         raise HTTPException(
             status_code=500,
             detail=("Could not update GTFOBins (neither via git nor download): "
-                    f"{str(msg)[:200]}. The bundled catalog is still available; to "
-                    "update manually, replace gtfobins_data/gtfobins.json."))
+                    f"{str(msg)[:200]}. The catalog you already had (if any) is still used; "
+                    "to install it by hand, put the JSON in gtfobins_data/gtfobins.json."))
 
 
 @app.get("/gtfobins/list")
@@ -1855,7 +1855,7 @@ LIMIT 50;</textarea>
  <section id="help" class="panel">
   <div class="help">
    <p>Loaded logs are normalized into a single <code>events</code> table and stored
-   in <b>UTC</b>, so you can correlate different sources on one timeline.</p>
+   in <b>UTC</b>, so you can correlate different sources on one timeline. Full documentation, tab by tab with screenshots: <a href="https://g92mz.github.io/longanizer/" target="_blank" rel="noopener">g92mz.github.io/longanizer</a>.</p>
 
    <h3>Explorer — search</h3>
    <ul>
@@ -1928,7 +1928,7 @@ LIMIT 50;</textarea>
 
    <h3>GTFOBins</h3>
    <ul>
-    <li>Catalog of legitimate Unix binaries and how they are abused. Click <b>Update catalog (GitHub)</b> to fetch/refresh it (needs <code>git</code> or outbound to GitHub); stored in <code>gtfobins_data/gtfobins.json</code>.</li>
+    <li>Catalog of legitimate Unix binaries and how they are abused. It is downloaded from the official GTFOBins repo when you install Longanizer (the first <code>python run.py</code>); <b>Update catalog (GitHub)</b> fetches it again or refreshes it (needs <code>git</code> or outbound access to GitHub). Stored in <code>gtfobins_data/gtfobins.json</code>, kept across updates.</li>
     <li><b>Check executed binaries</b> cross-references the catalog with what was actually run in the logs (auditd <code>execve</code>, <code>bash_history</code>, what was launched via <code>sudo</code>, and the real binary inside <b>BSD appliance shell logs</b> — <code>sh_command="…"</code> / <code>shell_command="…"</code> in <code>/var/log/sh.log</code> and <code>/var/log/bash.log</code>) and shows a section per binary with its techniques, abuse examples and contexts (<code>sudo</code>/<code>suid</code>/…).</li>
     <li><b>View full catalog</b> lists the binaries with a filter; click one to see its invocations. In the results, each sample links to its context in the Explorer.</li>
     <li><b>Privilege context</b>: each binary is tagged <b>via sudo</b>, <b>as root</b>, <b>⚠ escalation</b> (euid=0 with a non-root login) or <b>appliance shell</b> (executed from the BSD appliance shell, a privileged context); the dangerous ones come first and in red. The real SUID bit is not observable from logs alone.</li>

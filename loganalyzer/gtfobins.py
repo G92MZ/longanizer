@@ -2,8 +2,9 @@
 abusa de ellos (shell, reverse-shell, suid, sudo, file-read/write, etc.).
 
 El dato se trae del repo oficial (clonado con git) y se normaliza a un JSON
-plano en `gtfobins_data/gtfobins.json`, que es lo que consume la app. Se
-actualiza bajo demanda desde la pestaña GTFOBins (botón «Actualizar»).
+plano en `gtfobins_data/gtfobins.json`, que es lo que consume la app. No viaja
+en el repo (GTFOBins es GPL-3.0): run.py lo descarga en el primer arranque y la
+pestaña GTFOBins lo actualiza bajo demanda («Update catalog»).
 
 Formato del repo: `_gtfobins/<binario>` (sin extensión) con YAML frontmatter
 entre `---`, clave `functions: {tecnica: [{code, comment, contexts}]}`.
@@ -115,7 +116,10 @@ def _fetch_tarball(dest: str) -> None:
             req = urllib.request.Request(url, headers={"User-Agent": "loganalyzer"})
             data = urllib.request.urlopen(req, timeout=120).read()
             with tarfile.open(fileobj=io.BytesIO(data)) as tf:
-                tf.extractall(dest)
+                try:
+                    tf.extractall(dest, filter="data")   # sin rutas absolutas ni '..'
+                except TypeError:                         # Python sin filtros de tarfile
+                    tf.extractall(dest)
             return
         except Exception as e:  # noqa: BLE001
             last = e

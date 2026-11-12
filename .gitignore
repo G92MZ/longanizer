@@ -6,4 +6,6 @@ __pycache__/
 casos/*
 !casos/.keep
 geoip_data/*.mmdb
+gtfobins_data/*
+!gtfobins_data/.keep
 .DS_Store

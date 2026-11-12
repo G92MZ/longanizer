@@ -31,7 +31,7 @@ REPO = "longanizer"
 BRANCH = "main"
 
 # Top-level folders that are NEVER overwritten (your data).
-PROTECTED = {"casos", "geoip_data"}
+PROTECTED = {"casos", "geoip_data", "gtfobins_data"}
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
