@@ -590,7 +590,7 @@ def mcp_info():
             "<div class=\"err\" style=\"white-space:normal\">There is no case file in use "
             "right now, so the MCP server <b>would not see</b> this data." + extra +
             " To use MCP, load logs (the file will be created) or start with a fixed one: "
-            "<code>DUCKDB_PATH=/ruta/al/caso.duckdb python -m loganalyzer.app</code> "
+            "<code>python run.py --db /path/to/case.duckdb</code> "
             "(or CLI ingest with <code>--db</code>) and point MCP at the same "
             "file.</div>")
     claude_json = (
@@ -1855,7 +1855,7 @@ LIMIT 50;</textarea>
  <section id="help" class="panel">
   <div class="help">
    <p>Loaded logs are normalized into a single <code>events</code> table and stored
-   in <b>UTC</b>, so you can correlate different sources on one timeline.</p>
+   in <b>UTC</b>, so you can correlate different sources on one timeline. Full documentation, tab by tab with screenshots: <a href="https://g92mz.github.io/longanizer/" target="_blank" rel="noopener">g92mz.github.io/longanizer</a>.</p>
 
    <h3>Explorer — search</h3>
    <ul>

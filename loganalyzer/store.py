@@ -561,11 +561,14 @@ class EventStore:
         alterar los datos forenses cargados.
         """
         stripped = sql.strip().rstrip(";")
+        # los comentarios iniciales (-- … o /* … */) no cuentan: se quitan antes
+        # de decidir si la consulta es de lectura (las recetas de la ayuda los llevan)
+        stripped = re.sub(r"^(?:\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/))*\s*", "", stripped, flags=re.S)
         lowered = stripped.lower()
         if not (lowered.startswith("select") or lowered.startswith("with")
                 or lowered.startswith("pragma") or lowered.startswith("describe")
                 or lowered.startswith("summarize") or lowered.startswith("show")):
-            raise ValueError("Solo se permiten consultas de lectura (SELECT/WITH/DESCRIBE/SUMMARIZE).")
+            raise ValueError("Only read-only queries are allowed (SELECT / WITH / DESCRIBE / SUMMARIZE / SHOW / PRAGMA).")
         # Envolver con LIMIT si el usuario no puso uno y es un SELECT simple.
         if limit is not None and " limit " not in lowered and lowered.startswith("select"):
             stripped = f"SELECT * FROM ({stripped}) LIMIT {int(limit)}"

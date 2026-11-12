@@ -4,9 +4,9 @@
 
 **Forensic Linux log analyzer — parse once, query with SQL, hunt with Sigma.**
 
-Drop in the logs you pulled from a box, open the browser, and investigate:
-timeline, full‑text + field search, Sigma detections, GTFOBins, IOC
-extraction & sweep, GeoIP and a one‑click case report. Runs **100% offline**.
+Drop in the logs you pulled from a box, open the browser, and investigate: one timeline in UTC,
+full‑text and field search, Sigma detections, GTFOBins with privilege context, network
+connections, IOCs, triage marks and a one‑click case report. **Runs 100% locally and offline.**
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-DuckDB-009688)
@@ -16,89 +16,53 @@ extraction & sweep, GeoIP and a one‑click case report. Runs **100% offline**.
 
 ---
 
+<p align="center">
+  <img src="docs/assets/shots/home/explorer.webp" alt="The Explorer: every log source on one timeline" width="100%">
+</p>
+
+<p align="center">
+  <b>📚 Documentation: <a href="https://g92mz.github.io/longanizer/">g92mz.github.io/longanizer</a></b><br>
+  <sub>every tab and log format explained, with screenshots</sub>
+</p>
+
 ## 🚀 Quickstart
+
+Python **3.11+** with `pip`, on Windows, Linux or macOS.
 
 ```bash
 pip install -r requirements.txt
-python run.py                 # open http://127.0.0.1:8000 (or http://<this-pc-ip>:8000 from another machine)
+python run.py                 # then open http://127.0.0.1:8000 (or http://<this-pc-ip>:8000)
 ```
 
-```bash
-python run.py --port 8001     # run next to WinHound on another port
-python run.py --host 127.0.0.1  # only reachable from this machine
-python run.py --db case.duckdb  # keep the case in a file instead of memory
-```
+`python run.py` checks for updates on every start (`python update.py` does it on demand), keeping
+your cases and GeoIP data. Options, loading, time zones and cases in
+[Getting started](https://g92mz.github.io/longanizer/getting-started/).
 
-## 🧭 How you use it
+## ✨ What it does
 
-1. **📥 Load** — point it at a folder or drop files (`.zip`/`.tar.gz` auto‑extract). It auto‑detects each log type.
-2. **🔎 Explore** — browse the timeline or search. One query language in both apps: `field=value` (equal) and `field:value` (contains), `AND` / `OR` / `NOT`, `( )`, `-term`, wildcards, lists (`status:404,500`), comparisons (`status>=500`) and `/regex/`. Bad fields or syntax get a clear warning. Hover any value in the results and click ⊕ / ⊖ (or Ctrl/⌘-click) to add `field=value` to the query. The box autocompletes field names.
-3. **🛡️ Hunt** — run your **Sigma** rules over everything, see what matched, pivot to context.
-4. **📌 Triage** — mark events as pending / TP / FP with a note (saved inside the case file).
-5. **📄 Report** — export a self‑contained HTML case report to share.
+- 🧩 **Many log types** — auth, syslog / kern / cron, web access and error, auditd, bash_history, logfmt, CSV, dmesg, apt / dpkg, fontconfig, udev — detected automatically, even rotated or inside archives.
+- 🔎 **Search** — one query language shared with WinHound (`field=value` equal, `field:value` contains, `AND` / `OR` / `NOT`), facets, and click a cell to filter by it.
+- 🧬 **auditd enrichment** — EXECVE stitched into full command lines, hex and `saddr` decoded.
+- 🛡️ **Sigma** — Linux and web-server rules with what matched, correlation, and the case's ATT&CK coverage.
+- 🪤 **GTFOBins** — binaries that actually ran, cross-referenced with the catalogue and their privilege context.
+- 🌐 **Network and IOCs** — who talked to whom, indicators discovered in the data, and a sweep for the ones you paste; GeoIP / ASN for public IPs.
+- 📌 **Triage and report** — mark events, then export a self-contained HTML case report.
+- 🤖 **AI and MCP** — ask about the case through your AI provider, a local model or an MCP client, read-only.
 
-## 📸 In action
+## 🧪 Samples
 
-> Loaded with the bundled `sample_logs/` — an SSH brute‑force, a web‑shell drop and a tool‑download‑and‑run chain.
+`sample_logs/` holds a coherent intrusion — SSH brute force → web shell → download and run →
+sudo escalation — that lights up the example Sigma rules in `reglas_sigma/` and GTFOBins.
 
-**Explorer — full timeline across every log type**
+## 📝 Principles
 
-![Explorer](docs/img/01-explorer.png)
-
-**Search — `field:value`, exact `=`, `/regex/` and `-exclude`**
-
-![Search](docs/img/02-search.png)
-
-**Overview — one‑glance dashboard (events, top IPs, top users)**
-
-![Dashboard](docs/img/03-dashboard.png)
-
-**Sigma — your rules run over the logs, with “what matched” per hit**
-
-![Sigma](docs/img/04-sigma.png)
-
-**IOCs — indicators discovered in the data, grouped into collapsible cards and exportable**
-
-![IOCs](docs/img/05-iocs.png)
-
-## ✨ What's inside
-
-| | |
-|---|---|
-| 🧩 **Many log types** | auth · syslog/kern/cron · access · auditd · web error · bash_history · logfmt · CSV · dmesg · apt/dpkg · fontconfig · udev |
-| 🔎 **Smart search** | `field:value` / `=exact` / `!=` / `-NOT` / `/regex/` / `field:*` exists · field autocomplete · facets |
-| 🛡️ **Sigma engine** | Linux & webserver rules, correlation, ATT&CK matrix, "what matched" per hit |
-| 🧬 **auditd enrichment** | EXECVE stitched into full command lines, hex & `saddr` decoded (decoded values shown *in italics*) |
-| 🪤 **GTFOBins** | cross‑references binaries actually executed (incl. BSD appliance shell logs) with the catalog |
-| 🌐 **GeoIP / ASN** | public IPs tagged with country + Org/ISP (offline DB‑IP Lite) |
-| 🧷 **IOC extractor** | discovers the IOCs present in the data — IPs, domains, URLs, emails, user agents, hashes, file paths — in collapsible per‑type cards, ASN‑tagged, CSV/JSON export |
-| 🎯 **IOC sweep** | paste IPs/hashes/paths/users and sweep every log at once, export CSV |
-| ⏱️ **Live ingest** | progress by bytes with start / elapsed / ETA |
-| 🤖 **AI & MCP** | optional AI tab and an MCP server to query the case from Claude |
-
-## 📝 Notes
-
-- Everything runs locally — no cloud, no outbound calls except the optional GeoIP database download.
-- Cases are DuckDB files under `casos/` (git‑ignored). Use `--db` to pin one.
-- The Python package/module is named `loganalyzer`; the app is branded **Longanizer**.
-
-## 🔄 Updating
-
-Grab the latest version without git — the updater checks GitHub and updates the
-app in place, **keeping your cases and GeoIP databases** (`casos/`, `geoip_data/`):
-
-```bash
-python update.py            # check for a new version and update (asks first)
-python update.py --check    # only check, change nothing
-python update.py --yes      # update without asking
-```
-
-(Cloned with git? `git pull` works too.)
+- **Local and offline** — no cloud and no outbound calls, except the optional GeoIP download, the GTFOBins catalogue update and the AI endpoint you configure.
+- **Your data stays yours** in `casos/` and `geoip_data/`, git-ignored and kept across updates.
+- **No login** — the web UI has no authentication; keep it on a trusted network or use `--host 127.0.0.1`.
+- The Python package is named `loganalyzer`; the app is **Longanizer**.
 
 ## 📜 License
 
-Licensed under the **Apache License 2.0** — free to use, modify and distribute
-(including commercially); just keep the copyright and `NOTICE`, and state your
-changes. See [`LICENSE`](LICENSE).
+Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) and `NOTICE`.
 
 © 2026 Gregorio Moreno (**gmzpt**)
