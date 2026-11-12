@@ -18,8 +18,9 @@ Optional packages are installed by you with `pip`, not shipped in the repository
 
 ## Data
 
-- **GTFOBins** — the catalogue © [GTFOBins](https://gtfobins.github.io) (GPL-3.0); a snapshot ships in
-  `gtfobins_data/gtfobins.json` and **Update catalog** refreshes it.
+- **GTFOBins** — the catalogue © [GTFOBins](https://gtfobins.github.io) (GPL-3.0). It is **not
+  shipped** with Longanizer: the first start downloads it from the official repository into
+  `gtfobins_data/` (git-ignored), and **Update catalog** refreshes it.
 - **GeoIP** — IP geolocation by [DB-IP](https://db-ip.com) (DB-IP Lite, CC BY 4.0), downloaded
   on demand into `geoip_data/`.
 - **Sample incident** — `sample_logs/` is synthetic, with documentation IP ranges.

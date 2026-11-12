@@ -40,6 +40,9 @@ buttons.
 
 ## The catalogue
 
-A snapshot of the catalogue ships in `gtfobins_data/gtfobins.json`, so the check works out of the
-box and offline. **Update catalog (GitHub)** refreshes it (with `git`, or a tarball download when
-git is missing). **View full catalog** lists every binary with a filter.
+The catalogue is **downloaded when you install Longanizer**: the first `python run.py` fetches it
+from the official GTFOBins repository (with `git`, or a tarball download when git is missing) into
+`gtfobins_data/gtfobins.json`. From then on the check works offline, and updates keep it.
+
+- **Update catalog (GitHub)** refreshes it — or fetches it, if the first start had no network.
+- **View full catalog** lists every binary with a filter.

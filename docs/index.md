@@ -59,8 +59,8 @@ privilege context, network connections, IOCs, triage marks and a one-click case 
 
     ---
 
-    No cloud and no outbound calls, except the optional GeoIP download, the GTFOBins catalog
-    update and the AI endpoint you configure yourself.
+    No cloud and no outbound calls, except the GTFOBins catalogue download, the optional GeoIP
+    download and the AI endpoint you configure yourself.
 
 </div>
 

@@ -56,8 +56,8 @@ sudo escalation — that lights up the example Sigma rules in `reglas_sigma/` an
 
 ## 📝 Principles
 
-- **Local and offline** — no cloud and no outbound calls, except the optional GeoIP download, the GTFOBins catalogue update and the AI endpoint you configure.
-- **Your data stays yours** in `casos/` and `geoip_data/`, git-ignored and kept across updates.
+- **Local and offline** — no cloud and no outbound calls, except the GTFOBins catalogue (downloaded on the first start, then offline), the optional GeoIP download and the AI endpoint you configure.
+- **Your data stays yours** in `casos/`, `geoip_data/` and `gtfobins_data/`, git-ignored and kept across updates.
 - **No login** — the web UI has no authentication; keep it on a trusted network or use `--host 127.0.0.1`.
 - The Python package is named `loganalyzer`; the app is **Longanizer**.
 

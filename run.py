@@ -86,6 +86,39 @@ def _check_updates(auto_yes: bool) -> None:
               file=sys.stderr)
 
 
+def _ensure_gtfobins() -> None:
+    """El catálogo GTFOBins (GPL-3.0) no viaja en el repo: se descarga del repo
+    oficial en la instalación, es decir, en el primer arranque. Sin red no
+    bloquea: se avisa y se puede bajar luego con «Update catalog»."""
+    try:
+        from loganalyzer import gtfobins
+    except Exception:  # noqa: BLE001
+        return
+    if gtfobins.load():
+        return
+    import threading
+    print("[run] Descargando el catálogo GTFOBins (primer arranque)…", file=sys.stderr)
+    res: dict = {}
+
+    def work() -> None:
+        try:
+            res["ok"] = gtfobins.refresh()
+        except Exception as e:  # noqa: BLE001
+            res["err"] = e
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(150)
+    if "ok" in res:
+        print(f"[run] GTFOBins: {res['ok'].get('count')} binarios.", file=sys.stderr)
+    elif t.is_alive():
+        print("[run] GTFOBins sigue descargándose en segundo plano.", file=sys.stderr)
+    else:
+        print(f"[run] No se pudo descargar GTFOBins ({str(res.get('err'))[:120]}). "
+              "Pulsa «Update catalog» en la pestaña GTFOBins cuando haya red.",
+              file=sys.stderr)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(prog="run.py", description="Servicio web Longanizer")
     ap.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"),
@@ -102,6 +135,8 @@ if __name__ == "__main__":
 
     if not args.no_update:
         _check_updates(args.yes)
+
+    _ensure_gtfobins()
 
     if args.db:
         os.environ["DUCKDB_PATH"] = args.db

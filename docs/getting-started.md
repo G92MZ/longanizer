@@ -27,6 +27,10 @@ python run.py                    # http://127.0.0.1:8000 on this machine
 On start, `run.py` prints where to open it: `http://127.0.0.1:8000` on this machine and
 `http://<this-pc-ip>:8000` from another one on the network.
 
+The **first start** also downloads the [GTFOBins](detection/gtfobins.md) catalogue from GitHub.
+Without network it says so and starts anyway; fetch it later with **Update catalog** in the
+GTFOBins tab.
+
 | Option | What it does |
 |---|---|
 | `--port 8001` | another port — run it next to WinHound |
@@ -103,5 +107,5 @@ python update.py --check    # only check
 python update.py --yes      # update without asking
 ```
 
-The updater replaces the app files and **keeps your cases and GeoIP databases** (`casos/`,
-`geoip_data/`). Cloned with git? `git pull` works too.
+The updater replaces the app files and **keeps your cases, GeoIP databases and GTFOBins catalogue** (`casos/`,
+`geoip_data/`, `gtfobins_data/`). Cloned with git? `git pull` works too.
